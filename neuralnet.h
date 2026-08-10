@@ -1,10 +1,15 @@
 #ifndef NEURALNET_H
 #define NEURALNET_H
 
+#include <stdbool.h>
+
 typedef struct neuralnet neuralnet;
 typedef struct neuralnet_layer neuralnet_layer;
 typedef struct neuralnet_config neuralnet_config;
-typedef float (*neuralnet_activation_fn)(float NodeBias, float NodeValue);
+typedef struct neuralnet_backprop_config neuralnet_backprop_config;
+typedef struct neuralnet_delta_i_param neuralnet_delta_i_param;
+typedef float (*neuralnet_activation_fn)(float Value);
+typedef float (*neuralnet_delta_i_fn)(neuralnet *NN, neuralnet_delta_i_param *Param);
 
 /* memory allocation is not the focal point here, but since we're in C,
    it's kinda important to think about how you allocate memory */
@@ -40,6 +45,29 @@ struct neuralnet_config
     neuralnet_allocator_callback AllocatorCallback;
 };
 
+struct neuralnet_backprop_config
+{
+    neuralnet_delta_i_fn DeltaIFn;
+    float LearningRate;
+    int ExpectedOutputCount;
+    const float *ExpectedOutputs;
+};
+
+struct neuralnet_delta_i_param
+{
+    bool IsOutputLayer;
+    float NodeValue;
+    union {
+        struct {
+            float ExpectedValue;
+        } OutputLayer;
+        struct {
+            float NextLayerDeltaIValue;
+            float WeightOrBias;
+        } InnerLayer;
+    };
+};
+
 struct neuralnet
 {
     int InputCount;
@@ -67,7 +95,8 @@ struct neuralnet_layer
 neuralnet NeuralNet_Create(const neuralnet_config *Config);
 void NeuralNet_Destroy(neuralnet *NN);
 void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn Fn);
-
+/* NOTE: to use backprop, activation function used for feed forward must be differentiable (no step fn, ex: RELU) */
+void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config);
 
 
 
@@ -105,7 +134,7 @@ void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn Fn);
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param);
 static void NN__Randomize(neuralnet *NN);
 static float NN__GetRandomValue(void);
-static float NN__StepFn(float Bias, float Value);
+static float NN__StepFn(float Value);
 
 
 neuralnet NeuralNet_Create(const neuralnet_config *Config)
@@ -192,14 +221,38 @@ void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn ActivationFn)
             }
 
             NN->Layers[n].NodeValues[k] = ActivationFn(
-                NN->Layers[n].NodeBiases[k], 
-                Accum
+                Accum + NN->Layers[n].NodeBiases[k]
             );
         }
 
         PrevNodes = NN->Layers[n].NodeValues;
         PrevNodeCount = NN->Layers[n].NodeCount;
     }
+}
+
+void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config)
+{
+#if 0
+    for each layer: 
+        for all weights of each layer: 
+            calc new values:
+                calc delta_i:
+                    EXAMPLE pseudocode for delta_i using cost_fn(output) = 0.5 * sum((expected_i - output_i)^2), 
+                                                         activation_fn(x) = 1 / (1 + e^(-x)):
+                    d_sigmoid = node_value*(1 - node_value);
+                    if (is_output_layer)
+                        delta_i = d_sigmoid * (expected - node_value);      // NOTE: node_value == output, also note that cost_fn() turned into only 'expected - node_value' because of partial derivative with respect to 'node_value'
+                    else
+                        delta_i = d_sigmoid * (weight_or_bias * next_layer_delta_i);
+                calc change in value: 
+                    d_value = learning_rate * delta_i * prev_node_value     // NOTE: this is NODE VALUE, 
+                                                                            //  not the value of the weight or biases, but the output value of 
+                                                                            //  the node connecting to the node we came from
+                calc value (weight/biases):
+                    value += d_value                                        // NOTE: sum the values so the changes can accumulate
+
+        same sequence for biases
+#endif
 }
 
 
@@ -238,9 +291,9 @@ static float NN__GetRandomValue(void)
     return (float)rand() / RAND_MAX;
 }
 
-static float NN__StepFn(float Bias, float Value)
+static float NN__StepFn(float Value)
 {
-    if (Value > Bias)
+    if (Value > 0.0)
         return 1.0;
     return 0;
 }
