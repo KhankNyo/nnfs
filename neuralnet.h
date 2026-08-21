@@ -6,7 +6,8 @@
 typedef struct neuralnet neuralnet;
 typedef struct neuralnet_layer neuralnet_layer;
 typedef struct neuralnet_config neuralnet_config;
-typedef struct neuralnet_backprop_config neuralnet_backprop_config;
+typedef struct neuralnet_training_config neuralnet_training_config;
+typedef struct neuralnet_graddesc_config neuralnet_graddesc_config;
 typedef float (*neuralnet_activation_fn)(float Value);
 
 /* memory allocation is not the focal point here, but since we're in C,
@@ -43,11 +44,24 @@ struct neuralnet_config
     neuralnet_allocator_callback AllocatorCallback;
 };
 
-struct neuralnet_backprop_config
+struct neuralnet_training_config
 {
-    float LearningRate;
+    int SetCount;
+    int InputCount;
     int ExpectedOutputCount;
-    float *ExpectedOutputs;
+
+    const float *Inputs;
+    const float *ExpectedOutputs;
+
+    neuralnet_activation_fn ActivationFn;
+};
+
+struct neuralnet_graddesc_config
+{
+    float Rate;
+    float Epsilon;
+    int Iterations;
+    const neuralnet_training_config *TrainingConfig;
 };
 
 
@@ -73,17 +87,22 @@ struct neuralnet_layer
     /* [array with length of OutputCount] */
     float *NodeBiases;
     float *NodeValues;
-    float *DeltaWeight;
-    float *DeltaBias;
 };
 
 
 
 neuralnet NeuralNet_Create(const neuralnet_config *Config);
+neuralnet NeuralNet_CheapCopy(const neuralnet *NN);
 void NeuralNet_Destroy(neuralnet *NN);
+
+void NeuralNet_Randomize(neuralnet *NN);
 void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn Fn);
 /* NOTE: to use backprop, activation function used for feed forward must be differentiable (no step fn, ex: RELU) */
-void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config);
+float NeuralNet_Mse(neuralnet *NN, const neuralnet_training_config *Config);
+void NeuralNet_Backprop(neuralnet *NN, const float *Errors, float LearningRate);
+
+void NeuralNet_Print(const neuralnet *NN);
+float *NeuralNet_GetOutput(neuralnet *NN);
 
 
 
@@ -100,7 +119,9 @@ void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config);
 #include <stdint.h>
 #include <assert.h>
 #include <time.h>
+#include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 
 #define NN__ALLOC(p_nn, size_bytes) \
@@ -132,9 +153,8 @@ static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param 
 static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col);
 static void NN__MatDot(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT);
 static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col);
-static void NN__Randomize(neuralnet *NN);
 static float NN__GetRandomValue(void);
-static float NN__StepFn(float Value);
+static float NN__Sigmoid(float Value);
 static float NN__SigmoidDerivativeY(float Y);
 
 
@@ -168,8 +188,6 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
             NN.Layers[i].Weights = NN__ALLOC(&NN, OutputCount*InputCount*sizeof(NN.Layers[0].Weights[0]));
             NN.Layers[i].NodeBiases = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].NodeBiases[0]));
             NN.Layers[i].NodeValues = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].NodeValues[0]));
-            NN.Layers[i].DeltaWeight = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].DeltaWeight[0]));
-            NN.Layers[i].DeltaBias = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].DeltaBias[0]));
             NN.Layers[i].InputCount = InputCount;
             NN.Layers[i].OutputCount = OutputCount;
 
@@ -177,8 +195,29 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
         }
     }
 
-    NN__Randomize(&NN);
+    NeuralNet_Randomize(&NN);
     return NN;
+}
+
+neuralnet NeuralNet_CheapCopy(const neuralnet *NN)
+{
+    int *NodesPerLayer = NN__ALLOC(NN, NN->LayerCount * sizeof(NodesPerLayer[0]));
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        NodesPerLayer[i] = NN->Layers[i].OutputCount;
+    }
+
+    neuralnet_config Config = {
+        .AllocatorCallback = NN->AllocatorCallback,
+        .AllocatorData = NN->AllocatorData,
+        .InputCount = NN->InputCount,
+        .LayerCount = NN->LayerCount,
+        .NodeCountPerLayer = NodesPerLayer,
+    };
+    neuralnet Result = NeuralNet_Create(&Config);
+
+    NN__FREE(NN, NodesPerLayer);
+    return Result;
 }
 
 void NeuralNet_Destroy(neuralnet *NN)
@@ -188,8 +227,6 @@ void NeuralNet_Destroy(neuralnet *NN)
         NN__FREE(NN, NN->Layers[i].Weights);
         NN__FREE(NN, NN->Layers[i].NodeBiases);
         NN__FREE(NN, NN->Layers[i].NodeValues);
-        NN__FREE(NN, NN->Layers[i].DeltaWeight);
-        NN__FREE(NN, NN->Layers[i].DeltaBias);
     }
     NN__FREE(NN, NN->Layers);
     NN__FREE(NN, NN->Inputs);
@@ -199,7 +236,7 @@ void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn ActivationFn)
 {
     if (ActivationFn == NULL)
     {
-        ActivationFn = NN__StepFn;
+        ActivationFn = NN__Sigmoid;
     }
 
     assert(NN->LayerCount >= 1);
@@ -228,84 +265,135 @@ void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn ActivationFn)
     }
 }
 
-void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config)
+float NeuralNet_Mse(neuralnet *NN, const neuralnet_training_config *Config)
 {
-    assert(NN->LayerCount >= 2);
+    assert(Config->InputCount == NN->InputCount);
+    assert(Config->ExpectedOutputCount == NN->Layers[NN->LayerCount - 1].OutputCount);
+
+    float Result = 0;
+    for (int i = 0; i < Config->SetCount; i++)
     {
-        /* update output delta */
+        const float *Inputs = Config->Inputs + Config->InputCount*i;
+        const float *Expected = Config->ExpectedOutputs + Config->ExpectedOutputCount*i;
+
+        memcpy(NN->Inputs, Inputs, NN->InputCount * sizeof(NN->Inputs[0]));
+        NeuralNet_FeedForward(NN, Config->ActivationFn);
+        const float *Predictions = NeuralNet_GetOutput(NN);
+
+        for (int k = 0; k < Config->ExpectedOutputCount; k++)
         {
-            const neuralnet_layer *OutputLayer = &NN->Layers[NN->LayerCount - 1];
-            assert(OutputLayer->OutputCount == Config->ExpectedOutputCount);
-
-            for (int i = 0; i < OutputLayer->OutputCount; i++)
-            {
-                float Y = OutputLayer->NodeValues[i];
-                float Error = Y - Config->ExpectedOutputs[i];
-                float Gradient = NN__SigmoidDerivativeY(Y); /* NOTE: derivative of sigmoid: y' = y(1 - y) */
-                OutputLayer->DeltaWeight[i] = Error * Gradient;
-                OutputLayer->DeltaBias[i] = Error * Gradient;
-            }
+            float Diff = Predictions[k] - Expected[k];
+            Result += Diff*Diff;
         }
+    }
+    return Result / Config->SetCount;
+}
 
-        /* update hidden layer delta */
-        for (int i = NN->LayerCount - 2; i >= 0; i--)
+static void NN__FiniteDiff(neuralnet *OutGradient, neuralnet *Model, float Epsilon, const neuralnet_training_config *MseConfig)
+{
+    float Loss = NeuralNet_Mse(Model, MseConfig);
+    for (int i = 0; i < Model->LayerCount; i++)
+    {
+        neuralnet_layer *Layer = &Model->Layers[i];
+        for (int k = 0; k < Layer->OutputCount; k++)
         {
-            neuralnet_layer *Curr = &NN->Layers[i];
-            neuralnet_layer *Next = &NN->Layers[i + 1];
-
-            for (int k = 0; k < Curr->OutputCount; k++)
+            for (int n = 0; n < Layer->InputCount; n++)
             {
-                float SumBias = 0, 
-                      SumWeight = 0;
-                for (int j = 0; j < Next->OutputCount; j++)
-                {
-                    SumBias += Curr->NodeBiases[j] * Next->DeltaBias[j];
-                    SumWeight += Curr->Weights[j + k*Curr->InputCount] * Next->DeltaWeight[j];
-                }
-                float Gradient = NN__SigmoidDerivativeY(Curr->NodeValues[k]);
-                Curr->DeltaWeight[k] = SumWeight * Gradient;
-                Curr->DeltaBias[k] = SumBias * Gradient;
-            }
-        }
+                /* weights */
+                int Index = n + k*Layer->OutputCount;
 
-        /* update weights and biases */
-        int InputCount = NN->InputCount;
-        const float *Inputs = NN->Inputs;
+                float Tmp = Layer->Weights[Index];
+                Layer->Weights[Index] += Epsilon;
+                OutGradient->Layers[i].Weights[Index] = (NeuralNet_Mse(Model, MseConfig) - Loss) / Epsilon;
+                Layer->Weights[Index] = Tmp;
+            }
+
+            /* biases */
+            float Tmp = Layer->NodeBiases[k];
+            Layer->NodeBiases[k] += Epsilon;
+            OutGradient->Layers[i].NodeBiases[k] = (NeuralNet_Mse(Model, MseConfig) - Loss) / Epsilon;
+            Layer->NodeBiases[k] = Tmp;
+        }
+    }
+}
+
+void NeuralNet_GradientDescent(neuralnet *NN, const neuralnet_graddesc_config *Config)
+{
+    neuralnet Gradient = NeuralNet_CheapCopy(NN);
+    for (int i = 0; i < Config->Iterations; i++)
+    {
+        NN__FiniteDiff(&Gradient, NN, Config->Epsilon, Config->TrainingConfig);
         for (int i = 0; i < NN->LayerCount; i++)
         {
-            neuralnet_layer *Curr = &NN->Layers[i];
-            for (int k = 0; k < InputCount; k++)
+            neuralnet_layer *Layer = &NN->Layers[i];
+            for (int k = 0; k < Layer->OutputCount; k++)
             {
-                for (int j = 0; j < Curr->OutputCount; j++)
+                for (int n = 0; n < Layer->InputCount; n++)
                 {
-                    float DeltaWeight = Curr->DeltaWeight[j] * Inputs[k];
-                    Curr->Weights[j + k*InputCount] -= DeltaWeight * Config->LearningRate;
+                    /* weights */
+                    int Index = n + k*Layer->OutputCount;
+                    Layer->Weights[Index] -= Config->Rate * Gradient.Layers[i].Weights[Index];
                 }
 
-                float DeltaBias = Curr->DeltaBias[k] * 1.0;
-                Curr->NodeBiases[k] -= DeltaBias * Config->LearningRate;
+                /* biases */
+                Layer->NodeBiases[k] -= Config->Rate * Gradient.Layers[i].NodeBiases[k];
             }
-
-            Inputs = Curr->NodeValues;
-            InputCount = Curr->OutputCount;
         }
     }
+    NeuralNet_Destroy(&Gradient);
+}
+
+void NeuralNet_Backprop(neuralnet *NN, const float *Errors, float LearningRate)
+{
+
 }
 
 
-static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param)
+void NeuralNet_Print(const neuralnet *NN)
 {
-    switch (Param->Mode)
+    printf("Inputs: [");
+    for (int i = 0; i < NN->InputCount; i++)
     {
-    case NNALLOC_ALLOCATE: return malloc(Param->Allocate.SizeBytes);
-    case NNALLOC_FREE:     free(Param->Free.Ptr); break;
+        printf("%g ", NN->Inputs[i]);
     }
-    return NULL;
+    printf("]\n");
+
+    printf("Layers: %d\n", NN->LayerCount);
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        const neuralnet_layer *Layer = NN->Layers + i;
+        printf("    layer %d: in/out: %d/%d\n", i, Layer->InputCount, Layer->OutputCount);
+
+        printf("        node vals:  [ ");
+        for (int k = 0; k < Layer->OutputCount; k++)
+            printf("%6.3f ", Layer->NodeValues[k]);
+        printf("]\n");
+
+        printf("        node bias:  [ ");
+        for (int k = 0; k < Layer->OutputCount; k++)
+            printf("%6.3f ", Layer->NodeBiases[k]);
+        printf("]\n");
+
+        printf("        weights:\n");
+        for (int k = 0; k < Layer->OutputCount; k++)
+        {
+            printf("            [ ");
+            for (int j = 0; j < Layer->InputCount; j++)
+            {
+                printf("%6.3f ", Layer->Weights[j + k*Layer->OutputCount]);
+            }
+            printf("]\n");
+        }
+    }
+
+    printf("Neural network output: [ ");
+    for (int i = 0; i < NN->Layers[NN->LayerCount - 1].OutputCount; i++)
+        printf("%g ", NN->Layers[NN->LayerCount - 1].NodeValues[i]);
+    printf("]\n");
 }
 
-static void NN__Randomize(neuralnet *NN)
+void NeuralNet_Randomize(neuralnet *NN)
 {
-    srand(time(NULL));
     for (int n = 0; n < NN->LayerCount; n++)
     {
         neuralnet_layer *Layer = &NN->Layers[n];
@@ -318,8 +406,23 @@ static void NN__Randomize(neuralnet *NN)
                 Layer->Weights[k*Layer->OutputCount + i] = NN__GetRandomValue();
             }
         }
-
     }
+}
+
+float *NeuralNet_GetOutput(neuralnet *NN)
+{
+    return NN->Layers[NN->LayerCount - 1].NodeValues;
+}
+
+
+static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param)
+{
+    switch (Param->Mode)
+    {
+    case NNALLOC_ALLOCATE: return malloc(Param->Allocate.SizeBytes);
+    case NNALLOC_FREE:     free(Param->Free.Ptr); break;
+    }
+    return NULL;
 }
 
 /* NOTE: Y = M . X + B
@@ -378,11 +481,9 @@ static float NN__GetRandomValue(void)
     return (float)rand() / RAND_MAX;
 }
 
-static float NN__StepFn(float Value)
+static float NN__Sigmoid(float Value)
 {
-    if (Value > 0.0)
-        return 1.0;
-    return 0;
+    return 1.0 / (1.0 + expf(-Value));
 }
 
 #endif
