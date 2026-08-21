@@ -263,10 +263,12 @@ static void NN__LayerBackprop(neuralnet_layer *Layer, const float *Inputs, const
         float Delta = Errors[k] * NN__SigmoidDerivativeY(Layer->Outputs[k]);
         for (int i = 0; i < Layer->InputCount; i++)
         {
-            Layer->Weights[i + k*Layer->OutputCount] += LearningRate * Delta * Inputs[i];
+            Layer->Weights[i + k*Layer->OutputCount] -= LearningRate * Delta * Inputs[i];
         }
-        Layer->Biases[k] += LearningRate * Delta;
+        Layer->Biases[k] -= LearningRate * Delta;
+#if 0
         Layer->Deltas[k] = Delta;
+#endif
     }
 }
 
@@ -275,6 +277,7 @@ void NeuralNet_Train(neuralnet *NN, const neuralnet_training_config *Config)
     memcpy(NN->Inputs, Config->Inputs, Config->InputCount * sizeof(Config->Inputs[0]));
     NeuralNet_FeedForward(NN, Config->ActivationFn);
 
+#if 0
     neuralnet_layer *OutputLayer = &NN->Layers[NN->LayerCount - 1];
     for (int i = 0; i < Config->ExpectedOutputCount; i++)
     {
@@ -293,6 +296,35 @@ void NeuralNet_Train(neuralnet *NN, const neuralnet_training_config *Config)
         Errors = Prev->Deltas;
     }
     NN__LayerBackprop(&NN->Layers[0], NN->Inputs, Errors, Config->LearningRate);
+#else
+
+    neuralnet_layer *OutputLayer = &NN->Layers[NN->LayerCount - 1];
+    for (int i = 0; i < Config->ExpectedOutputCount; i++)
+    {
+        float Error = Config->ExpectedOutputs[i] - OutputLayer->Outputs[i];
+        OutputLayer->Deltas[i] = Error * NN__SigmoidDerivativeY(OutputLayer->Outputs[i]);
+    }
+
+    for (int i = NN->LayerCount - 2; i >= 0; i--)
+    {
+        neuralnet_layer *Next = NN->Layers + i + 1;
+        neuralnet_layer *Curr = NN->Layers + i;
+        NN__MatDot(Curr->Deltas, Next->Weights, Next->Deltas, Next->OutputCount, Next->InputCount, 1);
+        for (int k = 0; k < Curr->OutputCount; k++)
+        {
+            Curr->Deltas[k] = Curr->Deltas[k] * NN__SigmoidDerivativeY(Curr->Outputs[k]);
+        }
+    }
+
+    for (int i = 1; i < NN->LayerCount; i++)
+    {
+        neuralnet_layer *Layer = NN->Layers + i;
+        NN__LayerBackprop(Layer, Layer[-1].Outputs, Layer->Deltas, Config->LearningRate);
+    }
+    NN__LayerBackprop(&NN->Layers[0], NN->Inputs, NN->Layers[0].Deltas, Config->LearningRate);
+
+
+#endif
 }
 
 

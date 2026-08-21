@@ -111,7 +111,6 @@ int main(void)
         } break;
         case 'r':
         {
-            s_CurrentDataset = ((float)rand() / RAND_MAX * 4);
             DoTraining(&NN, IsTraining);
             DisplayStats(&NN, IsTraining);
         } break;
@@ -123,16 +122,17 @@ int main(void)
         {
             s_TotalTrails = 0;
             s_CorrectCount = 0;
-            for (int i = 0; i < 100000; i++)
+            for (int i = 0; i < 30000; i++)
             {
                 s_CurrentDataset = ((float)rand() / RAND_MAX * 4);
                 DoTraining(&NN, IsTraining);
                 DisplayStats(&NN, IsTraining);
-                usleep(100);
+                usleep(10);
             }
         } break;
         default:
         {
+            s_CurrentDataset = ((float)rand() / RAND_MAX * 4);
             DoTraining(&NN, IsTraining);
             DisplayStats(&NN, IsTraining);
         } break;
