@@ -82,10 +82,11 @@ struct neuralnet
 
 struct neuralnet_layer
 {
-    int WeightCount; /* == (this NodeCount)*(previous NodeCount) */
+    int InputCount;
+    int OutputCount;
+    /* [Input x Output matrix] */
     float *Weights;
-
-    int NodeCount;
+    /* [array of OutputCount biases and values] */
     float *NodeBiases;
     float *NodeValues;
 };
@@ -113,6 +114,7 @@ void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config);
 #include <stdint.h>
 #include <assert.h>
 #include <time.h>
+#include <math.h>
 
 
 #define NN__ALLOC(p_nn, size_bytes) \
@@ -131,10 +133,16 @@ void NeuralNet_BackPropagate(neuralnet *NN, neuralnet_backprop_config *Config);
             .Free.Ptr = (ptr), \
         }\
     )
+
+#define NN__ALLOCATION_SCOPE_BEGIN(p_nn)
+#define NN__ALLOCATION_SCOPE_END(p_nn)
+
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param);
+static void NN__LinearCombination(float *Y, const float *Mat, const float *X, const float *B, int NumRow, int NumCol);
 static void NN__Randomize(neuralnet *NN);
 static float NN__GetRandomValue(void);
 static float NN__StepFn(float Value);
+static float NN__SigmoidDerivativeY(float Y);
 
 
 neuralnet NeuralNet_Create(const neuralnet_config *Config)
@@ -159,18 +167,18 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
     {
         NN.Inputs = NN__ALLOC(&NN, sizeof(NN.Inputs[0]) * NN.InputCount);
         NN.Layers = NN__ALLOC(&NN, sizeof(NN.Layers[0]) * NN.LayerCount);
-        int PrevLayerNodeCount = Config->InputCount;
+        int InputCount = Config->InputCount;
         for (int i = 0; i < Config->LayerCount; i++)
         {
-            int CurrLayerNodeCount = Config->NodeCountPerLayer[i];
-            int WeightCount = PrevLayerNodeCount*CurrLayerNodeCount;
-            int BiasCount = CurrLayerNodeCount;
+            int OutputCount = Config->NodeCountPerLayer[i];
 
-            NN.Layers[i].Weights = NN__ALLOC(&NN, WeightCount*sizeof(NN.Layers[0].Weights[0]));
-            NN.Layers[i].NodeBiases = NN__ALLOC(&NN, BiasCount*sizeof(NN.Layers[0].NodeBiases[0]));
-            NN.Layers[i].NodeValues = NN__ALLOC(&NN, CurrLayerNodeCount*sizeof(NN.Layers[0].NodeValues[0]));
+            NN.Layers[i].Weights = NN__ALLOC(&NN, OutputCount*InputCount*sizeof(NN.Layers[0].Weights[0]));
+            NN.Layers[i].NodeBiases = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].NodeBiases[0]));
+            NN.Layers[i].NodeValues = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].NodeValues[0]));
+            NN.Layers[i].InputCount = InputCount;
+            NN.Layers[i].OutputCount = OutputCount;
 
-            PrevLayerNodeCount = CurrLayerNodeCount;
+            InputCount = OutputCount;
         }
     }
 
@@ -192,41 +200,34 @@ void NeuralNet_Destroy(neuralnet *NN)
 
 void NeuralNet_FeedForward(neuralnet *NN, neuralnet_activation_fn ActivationFn)
 {
-#if 0
-    /* NOTE: pseudocode: */
-    for each layer:
-        for each node - k:
-            accum = 0;
-            for each prev node - i:
-                accum += node[i] * weights[i][k]
-            node[k] = activation_fn(bias[k], accum)
-#endif
-
-
     if (ActivationFn == NULL)
     {
         ActivationFn = NN__StepFn;
     }
 
-    float *PrevNodes = NN->Inputs;
-    int PrevNodeCount = NN->InputCount;
-    for (int n = 0; n < NN->LayerCount; n++)
-    {
-        for (int k = 0; k < NN->Layers[n].NodeCount; k++)
-        {
-            float Accum = 0;
-            for (int i = 0; i < PrevNodeCount; i++)
-            {
-                Accum += PrevNodes[i] * NN->Layers[n].Weights[k*PrevNodeCount + i];
-            }
+    assert(NN->LayerCount >= 1);
+    assert(NN->InputCount == NN->Layers[0].InputCount);
+    /* NOTE: NeuralNet_Init() guarantees that 
+     * consecutive layers have the previous layer's output node count == the current layer's input node count */
 
-            NN->Layers[n].NodeValues[k] = ActivationFn(
-                Accum + NN->Layers[n].NodeBiases[k]
-            );
+    const float *X = NN->Inputs;
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        neuralnet_layer *Layer = &NN->Layers[i];
+
+        NN__LinearCombination(
+            Layer->NodeValues, 
+            Layer->Weights, X, Layer->NodeBiases, 
+            Layer->OutputCount, Layer->InputCount
+        );
+
+        /* NOTE: normalize outputs via activation fn ("squish" Y from -inf..+inf to 0..1) */
+        for (int r = 0; r < Layer->OutputCount; r++)
+        {
+            Layer->NodeValues[r] = ActivationFn(Layer->NodeValues[r]);
         }
 
-        PrevNodes = NN->Layers[n].NodeValues;
-        PrevNodeCount = NN->Layers[n].NodeCount;
+        X = Layer->NodeValues;
     }
 }
 
@@ -269,20 +270,56 @@ static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param 
 static void NN__Randomize(neuralnet *NN)
 {
     srand(time(NULL));
-    int PrevNodeCount = NN->InputCount;
     for (int n = 0; n < NN->LayerCount; n++)
     {
-        for (int k = 0; k < NN->Layers[n].NodeCount; k++)
+        neuralnet_layer *Layer = &NN->Layers[n];
+        for (int k = 0; k < Layer->OutputCount; k++)
         {
-            NN->Layers[n].NodeBiases[k] = NN__GetRandomValue();
-            NN->Layers[n].NodeValues[k] = NN__GetRandomValue();
-            for (int i = 0; i < PrevNodeCount; i++)
+            Layer->NodeBiases[k] = NN__GetRandomValue();
+            Layer->NodeValues[k] = NN__GetRandomValue();
+            for (int i = 0; i < Layer->InputCount; i++)
             {
-                NN->Layers[n].Weights[k*PrevNodeCount + i] = NN__GetRandomValue();
+                Layer->Weights[k*Layer->OutputCount + i] = NN__GetRandomValue();
             }
         }
 
-        PrevNodeCount = NN->Layers[n].NodeCount;
+    }
+}
+
+/* NOTE: Y = (M^T) . X + B
+ * [Y_0]   [TM_00 TM_0r]   [X_0]   [B_0]
+ * [Y_r] = [TM_c0 TM_cr] . [X_c] + [B_c]
+ */
+static void NN__LinearCombination(float *Y, const float *TranposedMat, const float *X, const float *B, int NumRow, int NumCol)
+{
+    for (int r = 0; r < NumRow; r++)
+    {
+        float Tmp = 0;
+        for (int c = 0; c < NumCol; c++)
+        {
+            /* NOTE: linear index for cache locality */
+            Tmp += TranposedMat[c + r*NumRow] * X[c] + B[c];
+        }
+        Y[r] = Tmp;
+    }
+}
+
+/* NOTE: Y = A . B^T, 
+ * NumColB is the number of columns in B (aka (B^T)^T) */
+static void NN__MatDot(float *Y, const float *A, const float *TranposedB, int NumRowA, int NumColA, int NumRowTB)
+{
+    int NumColB = NumRowTB;
+    for (int Cb = 0; Cb < NumColB; Cb++)
+    {
+        for (int Ra = 0; Ra < NumRowA; Ra++)
+        {
+            float Tmp = 0;
+            for (int Ca = 0; Ca < NumColA; Ca++)
+            {
+                Tmp += A[Ca + Ra*NumRowA] * TranposedB[Ca + Cb*NumColB];
+            }
+            Y[Ra*NumRowA + Cb] = Tmp;
+        }
     }
 }
 
