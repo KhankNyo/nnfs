@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 
 static float s_LearningRate = 1;
@@ -44,8 +45,10 @@ static void DisplayStats(neuralnet *NN, bool IsTraining)
 
     for (int i = 0; i < 4; i++)
     {
-        memcpy(NN->Inputs, s_InputTrainingData[i], sizeof(s_InputTrainingData[0]));
-        NeuralNet_FeedForward(NN, NULL);
+        NeuralNet_FeedForward(NN, &(neuralnet_feedforward_config) {
+            .InputCount = 2,
+            .Inputs = s_InputTrainingData[i], 
+        });
         printf("%g ^ %g = %f\n", s_InputTrainingData[i][0], s_InputTrainingData[i][1], NeuralNet_GetOutput(NN)[0]);
     }
     printf("\n");
@@ -53,23 +56,18 @@ static void DisplayStats(neuralnet *NN, bool IsTraining)
 
 static void DoTraining(neuralnet *NN, bool IsTraining)
 {
-    neuralnet_training_config TrainingConfig = {
-        .LearningRate = s_LearningRate,
-        .ExpectedOutputCount = 1,
-        .ExpectedOutputs = &s_ExpectedOutput[s_CurrentDataset],
+    NeuralNet_FeedForward(NN, &(neuralnet_feedforward_config) {
         .InputCount = 2,
         .Inputs = s_InputTrainingData[s_CurrentDataset],
-    };
+    });
     if (IsTraining)
     {
-        NeuralNet_Train(NN, &TrainingConfig);
+        NeuralNet_Backprop(NN, &(neuralnet_backprop_config) {
+            .ExpectedOutputCount = 1,
+            .ExpectedOutputs = &s_ExpectedOutput[s_CurrentDataset],
+            .LearningRate = s_LearningRate,
+        });
     }
-    else
-    {
-        memcpy(NN->Inputs, s_InputTrainingData[s_CurrentDataset], sizeof(s_InputTrainingData[0]));
-        NeuralNet_FeedForward(NN, NULL);
-    }
-
 
     s_TotalTrails++;
     s_Correct = (fabs(NeuralNet_GetOutput(NN)[0] - s_ExpectedOutput[s_CurrentDataset]) < 0.1);
@@ -88,11 +86,6 @@ int main(void)
         .LayerCount = 2,
         .NodeCountPerLayer = NodeCounts,
     });
-#if 0
-    NN.Layers[0].Biases[0] = -10;
-    NN.Layers[0].Weights[0] = 20;
-    NN.Layers[0].Weights[1] = 20;
-#endif
 
     bool IsTraining = true;
     while (1)
@@ -117,16 +110,16 @@ int main(void)
         {
             DisplayStats(&NN, IsTraining);
         } break;
-        case 'b':
+        case 'T':
         {
             IsTraining = !IsTraining;
         } break;
-        case 'r':
+        case 't':
         {
             DoTraining(&NN, IsTraining);
             DisplayStats(&NN, IsTraining);
         } break;
-        case 'a':
+        case 'r':
         {
             NeuralNet_Randomize(&NN);
         } break;
@@ -139,7 +132,7 @@ int main(void)
                 s_CurrentDataset = ((float)rand() / RAND_MAX * 4);
                 DoTraining(&NN, IsTraining);
                 DisplayStats(&NN, IsTraining);
-                usleep(1000);
+                usleep(100);
             }
         } break;
         default:
