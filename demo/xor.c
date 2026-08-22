@@ -27,10 +27,9 @@ static float s_ExpectedOutput[] = {
 
 
 
-static void DisplayStats(const neuralnet *NN, bool IsTraining)
+static void DisplayStats(neuralnet *NN, bool IsTraining)
 {
-    printf("\n"
-           "IsTraining:       %s\n", IsTraining? "true" : "false");
+    printf("\nIsTraining:       %s\n", IsTraining? "true" : "false");
     printf("Learning rate:    %f\n", s_LearningRate);
     printf("Current dataset:\n");
     printf("    [%g %g | %g]\n", 
@@ -41,7 +40,15 @@ static void DisplayStats(const neuralnet *NN, bool IsTraining)
     printf("Neural network states: \n");
     NeuralNet_Print(NN);
     printf("Correct/Attempts: %d/%d (%g%%)\n", s_CorrectCount, s_TotalTrails, (double)s_CorrectCount / s_TotalTrails * 100);
-    printf("Was correct: %s\n\n", s_Correct? "true" : "false");
+    printf("Was correct: %s\n", s_Correct? "true" : "false");
+
+    for (int i = 0; i < 4; i++)
+    {
+        memcpy(NN->Inputs, s_InputTrainingData[i], sizeof(s_InputTrainingData[0]));
+        NeuralNet_FeedForward(NN, NULL);
+        printf("%g ^ %g = %f\n", s_InputTrainingData[i][0], s_InputTrainingData[i][1], NeuralNet_GetOutput(NN)[0]);
+    }
+    printf("\n");
 }
 
 static void DoTraining(neuralnet *NN, bool IsTraining)
@@ -49,7 +56,7 @@ static void DoTraining(neuralnet *NN, bool IsTraining)
     neuralnet_training_config TrainingConfig = {
         .LearningRate = s_LearningRate,
         .ExpectedOutputCount = 1,
-        .ExpectedOutputs = s_ExpectedOutput,
+        .ExpectedOutputs = &s_ExpectedOutput[s_CurrentDataset],
         .InputCount = 2,
         .Inputs = s_InputTrainingData[s_CurrentDataset],
     };
@@ -81,6 +88,11 @@ int main(void)
         .LayerCount = 2,
         .NodeCountPerLayer = NodeCounts,
     });
+#if 0
+    NN.Layers[0].Biases[0] = -10;
+    NN.Layers[0].Weights[0] = 20;
+    NN.Layers[0].Weights[1] = 20;
+#endif
 
     bool IsTraining = true;
     while (1)
@@ -122,12 +134,12 @@ int main(void)
         {
             s_TotalTrails = 0;
             s_CorrectCount = 0;
-            for (int i = 0; i < 30000; i++)
+            for (int i = 0; i < 10000; i++)
             {
                 s_CurrentDataset = ((float)rand() / RAND_MAX * 4);
                 DoTraining(&NN, IsTraining);
                 DisplayStats(&NN, IsTraining);
-                usleep(10);
+                usleep(1000);
             }
         } break;
         default:

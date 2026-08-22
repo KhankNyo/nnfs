@@ -55,5 +55,27 @@ int main(void)
         MatPrint(Result, 2, 1);
     }
 
+    printf("\ntest3:\n");
+    {
+        float Result = 0;
+        float M[] = {
+            20, 20
+        };
+        float X[][2] = {
+            {0, 0},
+            {0, 1},
+            {1, 0},
+            {1, 1},
+        };
+        float B[] = {
+            0
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            NN__LinearCombination(&Result, M, X[i], B, 2, 1);
+            printf("%f, %f, %f\n", X[i][0], X[i][1], Result);
+        }
+    }
+
     return 0;
 }
