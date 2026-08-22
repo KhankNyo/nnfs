@@ -8,27 +8,13 @@ typedef struct neuralnet_layer neuralnet_layer;
 typedef struct neuralnet_config neuralnet_config;
 typedef struct neuralnet_backprop_config neuralnet_backprop_config;
 typedef struct neuralnet_feedforward_config neuralnet_feedforward_config;
-typedef float (*neuralnet_activation_fn)(float Value);
-
-/* memory allocation is not the focal point here, but since we're in C,
-   it's kinda important to think about how you allocate memory */
+typedef struct neuralnet_allocator_param neuralnet_allocator_param;
 typedef enum 
 {
     NNALLOC_ALLOCATE,
     NNALLOC_FREE,
 } neuralnet_allocator_mode;
-typedef struct 
-{
-    neuralnet_allocator_mode Mode;
-    union {
-        struct {
-            int SizeBytes;
-        } Allocate;
-        struct {
-            void *Ptr;
-        } Free;
-    };
-} neuralnet_allocator_param;
+typedef float (*neuralnet_activation_fn)(float Value);
 typedef void *(*neuralnet_allocator_callback)(void *AllocatorData, neuralnet_allocator_param *Param);
 
 
@@ -58,6 +44,33 @@ struct neuralnet_feedforward_config
     int InputCount;
 };
 
+/* memory allocation is not the focal point here, but since we're in C,
+   it's kinda important to think about how you allocate memory */
+struct neuralnet_allocator_param
+{
+    neuralnet_allocator_mode Mode;
+    union {
+        struct {
+            int SizeBytes;
+        } Allocate;
+        struct {
+            void *Ptr;
+        } Free;
+    };
+};
+
+
+neuralnet NeuralNet_Create(const neuralnet_config *Config);
+neuralnet NeuralNet_CheapCopy(const neuralnet *NN);
+void NeuralNet_Destroy(neuralnet *NN);
+
+void NeuralNet_Randomize(neuralnet *NN);
+void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config);
+void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config);
+
+void NeuralNet_Print(const neuralnet *NN);
+float *NeuralNet_GetOutput(neuralnet *NN);
+
 
 struct neuralnet
 {
@@ -84,20 +97,6 @@ struct neuralnet_layer
     float *Outputs;
     float *Deltas;
 };
-
-
-
-neuralnet NeuralNet_Create(const neuralnet_config *Config);
-neuralnet NeuralNet_CheapCopy(const neuralnet *NN);
-void NeuralNet_Destroy(neuralnet *NN);
-
-void NeuralNet_Randomize(neuralnet *NN);
-void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config);
-void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config);
-
-void NeuralNet_Print(const neuralnet *NN);
-float *NeuralNet_GetOutput(neuralnet *NN);
-
 
 
 #endif /* NEURALNET_H */
