@@ -5,10 +5,13 @@ LDF=-lm
 
 .PHONY: all clean
 
-all:xor.exe
+all:xor.exe number.exe
 
-xor.exe:*.c ../*.h
+xor.exe:xor.c ../*.h
 	gcc $(CCF) -o $@ xor.c $(LDF)
 
+number.exe:number.c ../*.h
+	gcc $(CCF) -o $@ number.c $(LDF)
+
 clean:
-	rm xor.exe
+	rm *.exe
