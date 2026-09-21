@@ -382,7 +382,7 @@ void NeuralNet_Randomize(neuralnet *NN)
             Layer->Deltas[k] = NN__GetRandomValue();
             for (int i = 0; i < Layer->InputCount; i++)
             {
-                Layer->Weights[k*Layer->OutputCount + i] = NN__GetRandomValue();
+                Layer->Weights[k*Layer->InputCount + i] = NN__GetRandomValue();
             }
         }
     }
@@ -470,7 +470,7 @@ static float NN__SigmoidDerivativeY(float Y)
 
 static float NN__GetRandomValue(void)
 {
-    return (float)rand() / RAND_MAX;
+    return (float)rand() / RAND_MAX * 2.0 - 1;
 }
 
 static float NN__Sigmoid(float Value)
