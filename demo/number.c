@@ -6,10 +6,75 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "extern/stb_image_write.h"
 
-#define TEST_IMAGE_WIDTH 28
-#define TEST_IMAGE_HEIGHT 28
-#define TEST_IMAGE_CHANNEL_COUNT 4
-#define TEST_IMAGE_PIXEL_COUNT (TEST_IMAGE_WIDTH*TEST_IMAGE_HEIGHT)
+#define NEURALNET_IMPLEMENTATION
+#include "neuralnet.h"
+
+#define IMAGE_WIDTH 28
+#define IMAGE_HEIGHT 28
+#define IMAGE_CHANNEL_COUNT 4
+#define TRAINING_IMAGE_CHANNEL_COUNT 1
+#define IMAGE_PIXEL_COUNT (IMAGE_WIDTH*IMAGE_HEIGHT)
+#define KB 1024
+#define MODEL_LAYER_COUNT 3
+#define ASSERTF(x, ...) do {\
+    if (!(x)) {\
+        printf("Assertion failed on line %d in %s:\n", __LINE__, __FILE__);\
+        printf("    "#x);\
+        printf("\n"__VA_ARGS__);\
+        abort();\
+    }\
+} while (0)
+
+
+typedef struct
+{
+    int Count;
+    int *Labels;
+    uint8_t *Samples;
+    void *Arena; /* only call free on arena since it owns the memory of Labels and Data */
+} data;
+
+
+static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidth, int ImageHeight)
+{
+    data Data = { 0 };
+
+    /* terrible code for loading the training data but idgaf */
+    FILE *TrainingFile = fopen(FileName, "rb");
+    ASSERTF(TrainingFile, "Unable to open %s\n", FileName);
+    {
+        int AllocSize = SampleCount
+            * (sizeof(Data.Labels[0]) + ImageWidth*ImageHeight);
+        Data.Arena = malloc(AllocSize);
+        ASSERTF(Data.Arena, "Out of memory trying to allocate %dkb\n", AllocSize / KB);
+
+        Data.Labels = Data.Arena;
+        Data.Samples = (void *)(Data.Labels + SampleCount);
+
+        uint8_t *Ptr = Data.Samples;
+        while (!feof(TrainingFile) && Data.Count < SampleCount)
+        {
+            fscanf(TrainingFile, "%d,", &Data.Labels[Data.Count]);
+            printf("Digit: %d\n", Data.Labels[Data.Count]);
+            for (int y = 0; y < IMAGE_HEIGHT; y++)
+            {
+                for (int x = 0; x < IMAGE_WIDTH; x++)
+                {
+                    int Pixel = 0;
+                    fscanf(TrainingFile, "%d,", &Pixel);
+                    uint8_t PixelByte = Pixel;
+                    memcpy(Ptr, &PixelByte, TRAINING_IMAGE_CHANNEL_COUNT);
+                    Ptr += TRAINING_IMAGE_CHANNEL_COUNT;
+                }
+            }
+            fscanf(TrainingFile, "\n");
+
+            Data.Count++;
+        }
+    }
+    fclose(TrainingFile);
+    return Data;
+}
 
 
 int main(int ArgumentCount, char **Arguments)
@@ -20,106 +85,69 @@ int main(int ArgumentCount, char **Arguments)
         return 1;
     }
 
+    /* https://github.com/phoebetronic/mnist/tree/main */
+    const char *TrainingFileName = "mnist_train.csv";
+    const char *TestFileName = "mnist_test.csv";
     int TestImageIndex = atoi(Arguments[1]);
     const char *OutputFileName = "test.bmp";
 
-    /* terrible code */
-    /* https://github.com/phoebetronic/mnist/tree/main */
-    FILE *TrainingFile = fopen("mnist_train.csv", "rb");
-    assert(TrainingFile);
-#if 0
+    int TrainingSampleCount = 60000; /* mnist_train.csv contains 60k training samples */
+    data TrainingData = { 0 };
     {
-        for (int i = 0; i < TestImageIndex && !feof(TrainingFile); i++)
-        {
-            char Ch = 0;
-            do {
-                Ch = fgetc(TrainingFile);
-            } while (Ch && Ch != '\n');
-        }
+        TrainingData = LoadTrainingCSV(TrainingFileName, TrainingSampleCount, IMAGE_WIDTH, IMAGE_HEIGHT);
 
-        if (feof(TrainingFile))
+        // https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/
+        int NodeCountPerLayer[MODEL_LAYER_COUNT] = {
+            [0] = 128,
+            [1] = 64,
+            [2] = 10, /* output layer, number of digits */
+        };
+        neuralnet NN = NeuralNet_Create(&(neuralnet_config) {
+            .InputCount = IMAGE_PIXEL_COUNT,
+            .LayerCount = MODEL_LAYER_COUNT,
+            .NodeCountPerLayer = NodeCountPerLayer,
+        });
         {
-            printf("Index too large\n");
-            return 1;
-        }
+            printf("\n> ");
+            char Input = getc(stdin);
 
-        int Digit = 0;
-        fscanf(TrainingFile, "%d,", &Digit); /* this sucks */
-        printf("Digit: %d\n", Digit);
-
-        static uint8_t ImageData[TEST_IMAGE_WIDTH * TEST_IMAGE_HEIGHT * TEST_IMAGE_CHANNEL_COUNT];
-        for (int y = 0; y < TEST_IMAGE_HEIGHT; y++)
-        {
-            for (int x = 0; x < TEST_IMAGE_WIDTH; x++)
+            switch (Input)
             {
-                int Index = y*TEST_IMAGE_WIDTH + x;
-                uint8_t *Ptr = ImageData + Index*TEST_IMAGE_CHANNEL_COUNT;
-
-                uint32_t Color = 0;
-                fscanf(TrainingFile, "%d,", &Color);
-                Color |= Color << 8 | Color << 16 | 0xFF000000;
-
-                memcpy(Ptr, &Color, sizeof Color);
-            }
-        }
-
-        printf("Writing digit %d to %s\n", Digit, OutputFileName);
-        stbi_write_bmp(OutputFileName, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT, TEST_IMAGE_CHANNEL_COUNT, ImageData);
-    }
-    fclose(TrainingFile);
-#else
-    /* mnist_train.csv contains 60k training samples */
-    int TrainingSampleCount = 3;
-    int DigitCount = 0;
-    void *Arena = NULL;
-    int *Digits = NULL;
-    uint8_t *TrainingData = NULL;
-    {
-        Arena = malloc(TrainingSampleCount * (sizeof(Digits[0]) + TEST_IMAGE_PIXEL_COUNT*TEST_IMAGE_CHANNEL_COUNT));
-        assert(Arena && "out of memory");
-        Digits = Arena;
-        TrainingData = (void *)(Digits + TrainingSampleCount);
-
-        uint8_t *Ptr = TrainingData;
-        while (!feof(TrainingFile) && DigitCount < TrainingSampleCount)
-        {
-            fscanf(TrainingFile, "%d,", &Digits[DigitCount]);
-            printf("Digit: %d\n", Digits[DigitCount]);
-            for (int y = 0; y < TEST_IMAGE_HEIGHT; y++)
+            default:
             {
-                for (int x = 0; x < TEST_IMAGE_WIDTH; x++)
+                printf("uwotm8, try 'h' for help\n");
+            } break;
+            case 'h':
+            {
+                printf(
+                    "q - quit\n"
+                    "T - train all from training sample '%s'\n"
+                    "p - predict a random sample from test suite '%s'\n"
+                    "P - predict all from test suite '%s'\n",
+                    TrainingFileName,
+                    TestFileName, TestFileName
+                );
+            } break;
+            case 'q':
+                return 0;
+            case 'T': /* train all */
+            {
+                for (int i = 0; i < TrainingSampleCount; i++)
                 {
-                    int Pixel = 0;
-                    fscanf(TrainingFile, "%d,", &Pixel);
-                    Pixel |= Pixel << 8 | Pixel << 16 | 0xFF000000;
-                    memcpy(Ptr, &Pixel, TEST_IMAGE_CHANNEL_COUNT);
-                    Ptr += TEST_IMAGE_CHANNEL_COUNT;
+
                 }
+            } break;
+            case 'p': /* predict a random sample from test suite */
+            {
+            } break;
+            case 'P': /* predict all */
+            {
+            } break;
             }
-            fscanf(TrainingFile, "\n");
-
-            DigitCount++;
         }
-
-
-        for (int i = 0; i < DigitCount; i++)
-        {
-            char TmpFileName[128] = { 0 };
-            snprintf(TmpFileName, 128, "%s%d", OutputFileName, i);
-            printf("Writing digit %d to %s\n", Digits[i], TmpFileName);
-            stbi_write_bmp(
-                TmpFileName, 
-                TEST_IMAGE_WIDTH, 
-                TEST_IMAGE_HEIGHT, 
-                TEST_IMAGE_CHANNEL_COUNT, 
-                TrainingData + i*TEST_IMAGE_PIXEL_COUNT*TEST_IMAGE_CHANNEL_COUNT
-            );
-        }
+        NeuralNet_Destroy(&NN);
     }
-    fclose(TrainingFile);
-
-    free(Arena);
-#endif
+    free(TrainingData.Arena);
     return 0;
 }
 
