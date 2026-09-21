@@ -32,7 +32,7 @@ int main(void)
         float BT[3*3];
         float Result[2*3] = { 0 };
         NN__MatTranpose(BT, B, 3, 3);
-        NN__MatDot(Result, A, BT, 3, 2, 3);
+        //NN__MatDot(Result, A, BT, 3, 2, 3);
         MatPrint(Result, 3, 2);
     }
 
