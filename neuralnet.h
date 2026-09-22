@@ -405,6 +405,121 @@ static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param 
     return NULL;
 }
 
+
+#if defined(NEURALNET_USE_SIMD)
+
+#include <x86intrin.h>
+#define NN__SIMD_VEC_LEN 8
+
+static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col)
+{
+    for (int c = 0; c < Col; c++)
+    {
+        const float *MPtr = M + c*Row;
+        const float *XPtr = X;
+
+        /* add 8 in parallel */
+        __m256 Accum = _mm256_set1_ps(0);
+        for (int r = 0; r < Row / NN__SIMD_VEC_LEN; r++)
+        {
+            __m256 MVec = _mm256_loadu_ps(MPtr);
+            __m256 XVec = _mm256_loadu_ps(XPtr);
+            Accum = _mm256_fmadd_ps(MVec, XVec, Accum);
+
+            MPtr += NN__SIMD_VEC_LEN;
+            XPtr += NN__SIMD_VEC_LEN;
+        }
+
+        /* reduce 8 to 1 */
+        float ScalarAccum = 0;
+        {
+            /* Accum[3, 2, 1, 0] -> Tmp[2, 3, 0, 1] */
+            __m256 Tmp = _mm256_shuffle_ps(Accum, Accum, _MM_SHUFFLE(2, 3, 0, 1));
+            /* Accum[23, 23, 01, 01] <- Accum[3, 2, 1, 0] + Tmp[2, 3, 0, 1] */
+            Accum = _mm256_add_ps(Accum, Tmp);
+            /* Accum[23, 23, 01, 01] -> Tmp[01, 01, 23, 23] */
+            Tmp = _mm256_shuffle_ps(Accum, Accum, _MM_SHUFFLE(0, 0, 2, 2));
+            /* Accum[0123, 0123, 0123, 0123] <- Accum[23, 23, 01, 01] + Tmp[01, 01, 23, 23] */
+            Accum = _mm256_add_ps(Accum, Tmp);
+
+            __m128 Low = _mm256_extractf128_ps(Accum, 0);
+            __m128 High = _mm256_extractf128_ps(Accum, 1);
+            __m128 Accum128 = _mm_add_ps(Low, High);
+
+            /* FUCK extractps, what a misleading name.
+             * It returns the bit representation of the float as int */
+            _mm_store_ss(&ScalarAccum, Accum128);
+        }
+
+
+        /* compiler will unroll loop with modulo operator */
+        for (int i = 0; i < Row % NN__SIMD_VEC_LEN; i++)
+        {
+            ScalarAccum += *MPtr * *XPtr;
+            MPtr++;
+            XPtr++;
+        }
+        Y[c] = ScalarAccum + B[c];
+    }
+}
+
+static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
+{
+    for (int Rtb = 0; Rtb < RowBT; Rtb++)
+    {
+        for (int Ca = 0; Ca < ColA; Ca++)
+        {
+            float Tmp = 0;
+            for (int Ra = 0; Ra < RowA; Ra++)
+            {
+                Tmp += A[Ra + Ca*RowA] * BT[Ra + Rtb*RowA];
+            }
+            Y[Ca*RowBT + Rtb] = Tmp;
+        }
+    }
+}
+
+static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col)
+{
+    for (int c = 0; c < Col; c++)
+    {
+        for (int r = 0; r < Row; r++)
+        {
+            Result[r*Col + c] = Mat[r + c*Row];
+        }
+    }
+}
+
+static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
+{
+    int Length = Col*Row;
+
+    /* main */
+    for (int i = 0; i < Length / NN__SIMD_VEC_LEN; i++)
+    {
+        __m256 Result = _mm256_sub_ps(
+            _mm256_loadu_ps(Lhs), 
+            _mm256_loadu_ps(Rhs)
+        );
+        _mm256_storeu_ps(Lhs, Result);
+
+        Lhs += NN__SIMD_VEC_LEN;
+        Rhs += NN__SIMD_VEC_LEN;
+    }
+
+    /* residue */
+    for (int i = 0; i < Length % NN__SIMD_VEC_LEN; i++)
+    {
+        float Result = *Lhs - *Rhs;
+        *Lhs = Result;
+
+        Lhs++;
+        Rhs++;
+    }
+}
+
+#else
+
 /* NOTE: Y = M . X + B
  * [Y_0]   [TM_00 TM_0r]   [X_0]   [B_0]
  * [Y_c] = [TM_c0 TM_cr] . [X_r] + [B_c]
@@ -461,6 +576,7 @@ static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
         }
     }
 }
+#endif
 
 
 static float NN__SigmoidDerivativeY(float Y)

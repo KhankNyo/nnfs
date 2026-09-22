@@ -7,6 +7,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "extern/stb_image_write.h"
 
+#define NEURALNET_USE_SIMD
 #define NEURALNET_IMPLEMENTATION
 #include "neuralnet.h"
 
@@ -234,13 +235,17 @@ int main(int ArgumentCount, char **Arguments)
             {
                 int TruePositiveCount = 0;
                 int Digit = 0;
+                double Start = clock();
                 for (int i = 0; i < TrainingSampleCount; i++)
                 {
                     const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
                     Digit = TrainingData.Labels[i];
-                    printf("Training in progress: %d/%d, precision: %4.2f%%\r", i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
+                    //printf("Training in progress: %d/%d, precision: %4.2f%%\r", i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
                     TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
                 }
+                double Dt = (clock() - Start) / CLOCKS_PER_SEC;
+                printf("time: %fs\n", Dt);
+
                 PrintVerdict(&NN, TrainingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
             } break;
             case 'p': /* predict a random sample from test suite */
