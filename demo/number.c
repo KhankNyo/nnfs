@@ -42,7 +42,8 @@ typedef enum
 } predict_flags;
 
 
-static int s_TruePositiveCount = 0;
+static float g_FpNNInputs[IMAGE_PIXEL_COUNT];
+static float g_FpNNExpectedOutputs[DIGIT_COUNT];
 
 
 static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidth, int ImageHeight)
@@ -88,48 +89,56 @@ static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidt
     return Data;
 }
 
-static void Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int ExpectedDigit, predict_flags Flags)
+static int FindMaxIndex(const float *Data, int Count)
 {
-    static float FpNNInputs[IMAGE_PIXEL_COUNT];
+    ASSERTF(Count, "Invalid count: %d\n", Count);
+    int MaxIndex = 0;
+    for (int i = 1; i < Count; i++)
+    {
+        if (Data[i] > Data[MaxIndex])
+            MaxIndex = i;
+    }
+    return MaxIndex;
+}
+
+static bool Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int ExpectedDigit, predict_flags Flags, float TruePositiveThreshold)
+{
     for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
     {
-        FpNNInputs[i] = Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
+        g_FpNNInputs[i] = Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
     }
 
     NeuralNet_FeedForward(NN, &(neuralnet_feedforward_config) {
         .InputCount = IMAGE_PIXEL_COUNT,
-        .Inputs = FpNNInputs,
+        .Inputs = g_FpNNInputs,
     });
 
-
+    memset(g_FpNNExpectedOutputs, 0, sizeof g_FpNNExpectedOutputs);
+    g_FpNNExpectedOutputs[ExpectedDigit] = 1.0;
     if (Flags & PREDICT_FLAG_ENABLE_BACKPROP)
     {
-        static float FpNNExpectedOutputs[DIGIT_COUNT];
-        memset(FpNNExpectedOutputs, 0, sizeof FpNNExpectedOutputs);
-        FpNNExpectedOutputs[ExpectedDigit] = 1.0;
         NeuralNet_Backprop(NN, &(neuralnet_backprop_config) {
             .ExpectedOutputCount = DIGIT_COUNT,
-            .ExpectedOutputs = FpNNExpectedOutputs,
+            .ExpectedOutputs = g_FpNNExpectedOutputs,
             .LearningRate = LearningRate,
         });
-
-        printf("Expected:    [");
-        for (int i = 0; i < DIGIT_COUNT; i++)
-            printf("%4.3f ", FpNNExpectedOutputs[i]);
-        printf("\n");
     }
-
+    bool IsCorrect = FindMaxIndex(NeuralNet_GetOutput(NN), DIGIT_COUNT) == ExpectedDigit;
+    return IsCorrect;
 }
 
-static void PrintVerdict(neuralnet *NN, int TotalSample, int Expected, float FalseNegativeThreshold, float TruePositiveThreshold)
+static void PrintVerdict(neuralnet *NN, int TotalSample, int TruePositiveCount, int Expected, float FalseNegativeThreshold, float TruePositiveThreshold)
 {
     const float *Output = NeuralNet_GetOutput(NN);
-    s_TruePositiveCount += Output[Expected] > TruePositiveThreshold;
+    printf("Expected:    [");
+    for (int i = 0; i < DIGIT_COUNT; i++)
+        printf("%4.3f ", g_FpNNExpectedOutputs[i]);
+    printf("]\n");
 
     printf("Digits 0..9: [");
     for (int i = 0; i < DIGIT_COUNT; i++)
         printf("%4.3f ", Output[i]);
-    printf("]\n");
+    printf("], best guess: %d\n", FindMaxIndex(Output, DIGIT_COUNT));
     printf("Correctness: [");
     for (int i = 0; i < DIGIT_COUNT; i++)
     {
@@ -139,9 +148,22 @@ static void PrintVerdict(neuralnet *NN, int TotalSample, int Expected, float Fal
             printf("  %c   ", Output[i] < FalseNegativeThreshold? '_' : 'x');
     }
     printf("]\n");
-    float Precision = (float)s_TruePositiveCount / (TotalSample);
-    printf("Precision: %4.2f%% (%d/%d)\n", Precision * 100, s_TruePositiveCount, TotalSample);
+    float Precision = (float)TruePositiveCount / (TotalSample);
+    printf("Precision: %4.2f%% (%d/%d)\n", Precision * 100, TruePositiveCount, TotalSample);
     printf("----------------------------\n");
+}
+
+static void WriteTestSampleToFile(const char *FileName, const uint8_t *Data)
+{
+    uint32_t *Image = malloc(IMAGE_PIXEL_COUNT*sizeof(Image[0]));
+    ASSERTF(Image, "Out of memory trying to allocate %dkb\n", (int)(IMAGE_WIDTH*IMAGE_HEIGHT*sizeof(Image[0]) / KB));
+    for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
+    {
+        Image[i] = 0xFF000000 | Data[i] | (uint32_t)Data[i] << 8 | (uint32_t)Data[i] << 16;
+    }
+
+    stbi_write_bmp(FileName, IMAGE_WIDTH, IMAGE_HEIGHT, 4, Image);
+    free(Image);
 }
 
 
@@ -150,11 +172,12 @@ int main(int ArgumentCount, char **Arguments)
     srand(time(NULL));
     /* https://github.com/phoebetronic/mnist/tree/main */
     const char *TrainingFileName = "mnist_train.csv";
-    const char *TestFileName = "mnist_test.csv";
+    const char *TestingFileName = "mnist_test.csv";
+    const char *RandomPredictionFileName = "p.bmp";
 
     /* config */
-    float TruePositiveThreshold = 0.8;
-    float FalseNegativeThreshold = 0.2;
+    float TruePositiveThreshold = 0.7;
+    float FalseNegativeThreshold = 0.3;
     float LearningRate = 1.0;
     // https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
@@ -164,11 +187,16 @@ int main(int ArgumentCount, char **Arguments)
     };
 
     int TrainingSampleCount = 60000; /* mnist_train.csv contains 60k training samples */
+    int TestingSampleCount = 10000;
     data TrainingData = { 0 };
+    data TestingData = { 0 };
     {
         printf("Loading training data...\n");
         TrainingData = LoadTrainingCSV(TrainingFileName, TrainingSampleCount, IMAGE_WIDTH, IMAGE_HEIGHT);
         printf("%d training samples loaded\n", TrainingSampleCount);
+        printf("Loading testing data...\n");
+        TestingData = LoadTrainingCSV(TestingFileName, TestingSampleCount, IMAGE_WIDTH, IMAGE_HEIGHT);
+        printf("%d testing samples loaded\n", TestingSampleCount);
 
         neuralnet NN = NeuralNet_Create(&(neuralnet_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
@@ -194,35 +222,59 @@ int main(int ArgumentCount, char **Arguments)
                     "p - predict a random sample from test suite '%s'\n"
                     "P - predict all from test suite '%s'\n",
                     TrainingFileName,
-                    TestFileName, TestFileName
+                    TestingFileName, 
+                    TestingFileName
                 );
             } break;
+
             case 'q':
-                return 0;
+                goto Out;
+
             case 'T': /* train all */
             {
-                s_TruePositiveCount = 0;
+                int TruePositiveCount = 0;
+                int Digit = 0;
                 for (int i = 0; i < TrainingSampleCount; i++)
                 {
-                    uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
-                    int Digit = TrainingData.Labels[i];
-                    printf("Sample %d: label: %d\n", i, Digit);
-                    Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP);
-                    PrintVerdict(&NN, i + 1, Digit, FalseNegativeThreshold, TruePositiveThreshold);
-
+                    const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
+                    Digit = TrainingData.Labels[i];
+                    printf("Training in progress: %d/%d, precision: %4.2f%%\r", i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
+                    TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
                 }
+                PrintVerdict(&NN, TrainingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
             } break;
             case 'p': /* predict a random sample from test suite */
             {
+                int Index = (float)rand() / RAND_MAX * (TestingSampleCount - 1);
+                int Digit = TestingData.Labels[Index];
+                const uint8_t *Sample = TestingData.Samples + Index*IMAGE_PIXEL_COUNT;
+
+                WriteTestSampleToFile(RandomPredictionFileName, Sample);
+                printf("Wrote test sample to '%s'\n", RandomPredictionFileName);
+
+                bool Correct = Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_NONE, TruePositiveThreshold);
+                PrintVerdict(&NN, 1, Correct, Digit, FalseNegativeThreshold, TruePositiveThreshold);
             } break;
             case 'P': /* predict all */
             {
+                int TruePositiveCount = 0;
+                int Digit = 0;
+                for (int i = 0; i < TestingSampleCount; i++)
+                {
+                    const uint8_t *Sample = TestingData.Samples + i*IMAGE_PIXEL_COUNT;
+                    Digit = TestingData.Labels[i];
+                    printf("Testing in progress: %d/%d, precision: %4.2f%%\r", i, TestingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
+                    TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_NONE, TruePositiveThreshold);
+                }
+                PrintVerdict(&NN, TestingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
             } break;
             }
         }
+Out:
         NeuralNet_Destroy(&NN);
     }
     free(TrainingData.Arena);
+    free(TestingData.Arena);
     return 0;
 }
 

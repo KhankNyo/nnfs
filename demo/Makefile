@@ -1,6 +1,6 @@
 
 
-CCF=-Wall -Wextra -ggdb -I".." -O2
+CCF=-Wall -Wextra -ggdb -I".." -O3 -mavx2
 LDF=-lm
 
 .PHONY: all clean
