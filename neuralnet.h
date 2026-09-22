@@ -9,6 +9,7 @@ typedef struct neuralnet_config neuralnet_config;
 typedef struct neuralnet_backprop_config neuralnet_backprop_config;
 typedef struct neuralnet_feedforward_config neuralnet_feedforward_config;
 typedef struct neuralnet_allocator_param neuralnet_allocator_param;
+typedef struct neuralnet_param_stats neuralnet_param_stats;
 typedef enum 
 {
     NNALLOC_ALLOCATE,
@@ -44,6 +45,12 @@ struct neuralnet_feedforward_config
     int InputCount;
 };
 
+struct neuralnet_param_stats
+{
+    float WeightMin, WeightMax;
+    float BiasMin, BiasMax;
+};
+
 /* memory allocation is not the focal point here, but since we're in C,
    it's kinda important to think about how you allocate memory */
 struct neuralnet_allocator_param
@@ -67,6 +74,7 @@ void NeuralNet_Destroy(neuralnet *NN);
 void NeuralNet_Randomize(neuralnet *NN);
 void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config);
 void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config);
+neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN);
 
 void NeuralNet_Print(const neuralnet *NN);
 float *NeuralNet_GetOutput(neuralnet *NN);
@@ -113,6 +121,7 @@ struct neuralnet_layer
 #include <assert.h>
 #include <stdio.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 
 
@@ -141,6 +150,7 @@ struct neuralnet_layer
         NN__ALLOCATION_SCOPE_END(p_nn), (nn__alloc_scope = 0)\
     )
 #define NN__MAX(a, b) ((a) > (b)? (a) : (b))
+#define NN__MIN(a, b) ((a) < (b)? (a) : (b))
 
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param);
 static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col);
@@ -321,6 +331,31 @@ void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config)
     }
 }
 
+neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
+{
+    neuralnet_param_stats Stats = { 
+        .BiasMax = -FLT_MAX,
+        .BiasMin = FLT_MAX,
+        .WeightMax = -FLT_MAX,
+        .WeightMin = FLT_MAX,
+    };
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        neuralnet_layer *Layer = NN->Layers + i;
+        for (int k = 0; k < Layer->OutputCount; k++)
+        {
+            Stats.BiasMax = NN__MAX(Stats.BiasMax, Layer->Biases[k]);
+            Stats.BiasMin = NN__MIN(Stats.BiasMin, Layer->Biases[k]);
+            for (int j = 0; j < Layer->InputCount; j++)
+            {
+                int Index = k*Layer->InputCount + j;
+                Stats.WeightMax = NN__MAX(Stats.WeightMax, Layer->Weights[Index]);
+                Stats.WeightMin = NN__MIN(Stats.WeightMin, Layer->Weights[Index]);
+            }
+        }
+    }
+    return Stats;
+}
 
 void NeuralNet_Print(const neuralnet *NN)
 {
