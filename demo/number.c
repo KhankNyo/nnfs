@@ -240,11 +240,11 @@ int main(int ArgumentCount, char **Arguments)
                 {
                     const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
                     Digit = TrainingData.Labels[i];
-                    //printf("Training in progress: %d/%d, precision: %4.2f%%\r", i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
+                    printf("\rTraining in progress: %d/%d, precision: %4.2f%%", i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
                     TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
                 }
                 double Dt = (clock() - Start) / CLOCKS_PER_SEC;
-                printf("time: %fs\n", Dt);
+                printf("\ntime: %fs\n", Dt);
 
                 PrintVerdict(&NN, TrainingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
             } break;

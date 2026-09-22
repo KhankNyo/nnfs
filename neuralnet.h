@@ -411,83 +411,42 @@ static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param 
 #include <x86intrin.h>
 #define NN__SIMD_VEC_LEN 8
 
-static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col)
+static float NN__DotProduct(const float *A, const float *B, int Length)
 {
-    for (int c = 0; c < Col; c++)
+    __m256 Accum = _mm256_setzero_ps();
+    for (int i = 0; i < Length / NN__SIMD_VEC_LEN; i++)
     {
-        const float *MPtr = M + c*Row;
-        const float *XPtr = X;
-
-        /* add 8 in parallel */
-        __m256 Accum = _mm256_set1_ps(0);
-        for (int r = 0; r < Row / NN__SIMD_VEC_LEN; r++)
-        {
-            __m256 MVec = _mm256_loadu_ps(MPtr);
-            __m256 XVec = _mm256_loadu_ps(XPtr);
-            Accum = _mm256_fmadd_ps(MVec, XVec, Accum);
-
-            MPtr += NN__SIMD_VEC_LEN;
-            XPtr += NN__SIMD_VEC_LEN;
-        }
-
-        /* reduce 8 to 1 */
-        float ScalarAccum = 0;
-        {
-            /* Accum[3, 2, 1, 0] -> Tmp[2, 3, 0, 1] */
-            __m256 Tmp = _mm256_shuffle_ps(Accum, Accum, _MM_SHUFFLE(2, 3, 0, 1));
-            /* Accum[23, 23, 01, 01] <- Accum[3, 2, 1, 0] + Tmp[2, 3, 0, 1] */
-            Accum = _mm256_add_ps(Accum, Tmp);
-            /* Accum[23, 23, 01, 01] -> Tmp[01, 01, 23, 23] */
-            Tmp = _mm256_shuffle_ps(Accum, Accum, _MM_SHUFFLE(0, 0, 2, 2));
-            /* Accum[0123, 0123, 0123, 0123] <- Accum[23, 23, 01, 01] + Tmp[01, 01, 23, 23] */
-            Accum = _mm256_add_ps(Accum, Tmp);
-
-            __m128 Low = _mm256_extractf128_ps(Accum, 0);
-            __m128 High = _mm256_extractf128_ps(Accum, 1);
-            __m128 Accum128 = _mm_add_ps(Low, High);
-
-            /* FUCK extractps, what a misleading name.
-             * It returns the bit representation of the float as int */
-            _mm_store_ss(&ScalarAccum, Accum128);
-        }
-
-
-        /* compiler will unroll loop with modulo operator */
-        for (int i = 0; i < Row % NN__SIMD_VEC_LEN; i++)
-        {
-            ScalarAccum += *MPtr * *XPtr;
-            MPtr++;
-            XPtr++;
-        }
-        Y[c] = ScalarAccum + B[c];
+        __m256 VecA = _mm256_loadu_ps(A);
+        __m256 VecB = _mm256_loadu_ps(B);
+        Accum = _mm256_fmadd_ps(VecA, VecB, Accum); /* Accum += A * B; */
+        A += NN__SIMD_VEC_LEN;
+        B += NN__SIMD_VEC_LEN;
     }
-}
 
-static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
-{
-    for (int Rtb = 0; Rtb < RowBT; Rtb++)
+    float Result = 0;
     {
-        for (int Ca = 0; Ca < ColA; Ca++)
-        {
-            float Tmp = 0;
-            for (int Ra = 0; Ra < RowA; Ra++)
-            {
-                Tmp += A[Ra + Ca*RowA] * BT[Ra + Rtb*RowA];
-            }
-            Y[Ca*RowBT + Rtb] = Tmp;
-        }
-    }
-}
+        /* Accum[3, 2, 1, 0] -> Tmp[2, 3, 0, 1] */
+        __m256 Tmp = _mm256_shuffle_ps(Accum, Accum, _MM_SHUFFLE(2, 3, 0, 1));
+        /* Accum[23, 23, 01, 01] <- Accum[3, 2, 1, 0] + Tmp[2, 3, 0, 1] */
+        Accum = _mm256_add_ps(Accum, Tmp);
+        /* Accum[23, 23, 01, 01] -> Tmp[01, 01, 23, 23] */
+        Tmp = _mm256_shuffle_ps(Accum, Accum, _MM_SHUFFLE(0, 0, 2, 2));
+        /* Accum[0123, 0123, 0123, 0123] <- Accum[23, 23, 01, 01] + Tmp[01, 01, 23, 23] */
+        Accum = _mm256_add_ps(Accum, Tmp);
 
-static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col)
-{
-    for (int c = 0; c < Col; c++)
-    {
-        for (int r = 0; r < Row; r++)
-        {
-            Result[r*Col + c] = Mat[r + c*Row];
-        }
+        __m128 Low = _mm256_extractf128_ps(Accum, 0);
+        __m128 High = _mm256_extractf128_ps(Accum, 1);
+        __m128 Accum128 = _mm_add_ps(Low, High);
+        _mm_store_ss(&Result, Accum128);
     }
+
+    for (int i = 0; i < Length % NN__SIMD_VEC_LEN; i++)
+    {
+        Result += *A * *B;
+        A++;
+        B++;
+    }
+    return Result;
 }
 
 static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
@@ -520,49 +479,14 @@ static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
 
 #else
 
-/* NOTE: Y = M . X + B
- * [Y_0]   [TM_00 TM_0r]   [X_0]   [B_0]
- * [Y_c] = [TM_c0 TM_cr] . [X_r] + [B_c]
- */
-static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col)
+static float NN__DotProduct(const float *A, const float *B, int Length)
 {
-    for (int c = 0; c < Col; c++)
+    float Result = 0;
+    for (int i = 0; i < Length; i++)
     {
-        float Tmp = 0;
-        for (int r = 0; r < Row; r++)
-        {
-            Tmp += M[r + c*Row] * X[r];
-        }
-        Y[c] = Tmp + B[c];
+        Result += A[i] * B[i];
     }
-}
-
-/* NOTE: Y = A . B^T */
-static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
-{
-    for (int Rtb = 0; Rtb < RowBT; Rtb++)
-    {
-        for (int Ca = 0; Ca < ColA; Ca++)
-        {
-            float Tmp = 0;
-            for (int Ra = 0; Ra < RowA; Ra++)
-            {
-                Tmp += A[Ra + Ca*RowA] * BT[Ra + Rtb*RowA];
-            }
-            Y[Ca*RowBT + Rtb] = Tmp;
-        }
-    }
-}
-
-static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col)
-{
-    for (int c = 0; c < Col; c++)
-    {
-        for (int r = 0; r < Row; r++)
-        {
-            Result[r*Col + c] = Mat[r + c*Row];
-        }
-    }
+    return Result;
 }
 
 static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
@@ -577,6 +501,47 @@ static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
     }
 }
 #endif
+
+
+/* NOTE: Y = M . X + B
+ * [Y_0]   [TM_00 TM_0r]   [X_0]   [B_0]
+ * [Y_c] = [TM_c0 TM_cr] . [X_r] + [B_c]
+ */
+static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col)
+{
+    for (int c = 0; c < Col; c++)
+    {
+        const float *MatrixRow = M + c*Row;
+        float Dp = NN__DotProduct(MatrixRow, X, Row);
+        Y[c] = Dp + B[c];
+    }
+}
+
+/* NOTE: Y = A . B^T */
+static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
+{
+    for (int Rtb = 0; Rtb < RowBT; Rtb++)
+    {
+        for (int Ca = 0; Ca < ColA; Ca++)
+        {
+            const float *RowMatA = A + Ca*RowA;
+            const float *ColMatB = BT + Rtb*RowA;
+            float Dp = NN__DotProduct(RowMatA, ColMatB, RowA);
+            Y[Ca*RowBT + Rtb] = Dp;
+        }
+    }
+}
+
+static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col)
+{
+    for (int c = 0; c < Col; c++)
+    {
+        for (int r = 0; r < Row; r++)
+        {
+            Result[r*Col + c] = Mat[r + c*Row];
+        }
+    }
+}
 
 
 static float NN__SigmoidDerivativeY(float Y)
