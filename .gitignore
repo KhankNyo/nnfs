@@ -3,3 +3,4 @@ compile_commands.json
 .cache
 mnist_train.csv
 mnist_test.csv
+demo/tmp
