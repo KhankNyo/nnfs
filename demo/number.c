@@ -7,6 +7,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "extern/stb_image_write.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "extern/stb_image.h"
+
 #define NEURALNET_USE_SIMD
 #define NEURALNET_IMPLEMENTATION
 #include "neuralnet.h"
@@ -183,6 +186,7 @@ int main(int ArgumentCount, char **Arguments)
     const char *TrainingFileName = "mnist_train.csv";
     const char *TestingFileName = "mnist_test.csv";
     const char *RandomPredictionFileName = "p.bmp";
+    const char *InputFileName = "i.png";
 
     /* config */
     float TruePositiveThreshold = 0.7;
@@ -280,6 +284,9 @@ int main(int ArgumentCount, char **Arguments)
                     TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_NONE, TruePositiveThreshold);
                 }
                 PrintVerdict(&NN, TestingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+            } break;
+            case 'i':
+            {
             } break;
             }
         }
