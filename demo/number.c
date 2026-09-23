@@ -10,6 +10,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "extern/stb_image.h"
 
+#define IMAGE_IMPLEMENTATION
+#include "extern/image.h"
+
 #define NEURALNET_USE_SIMD
 #define NEURALNET_IMPLEMENTATION
 #include "neuralnet.h"
@@ -21,7 +24,7 @@
 #define IMAGE_PIXEL_COUNT (IMAGE_WIDTH*IMAGE_HEIGHT)
 #define DIGIT_COUNT 10
 #define KB 1024
-#define MODEL_LAYER_COUNT 3
+#define MODEL_LAYER_COUNT 2
 #define ASSERTF(x, ...) do {\
     if (!(x)) {\
         printf("Assertion failed on line %d in %s:\n", __LINE__, __FILE__);\
@@ -43,6 +46,7 @@ typedef enum
 {
     PREDICT_FLAG_NONE = 0,
     PREDICT_FLAG_ENABLE_BACKPROP = 1 << 0,
+    PREDICT_FLAG_RGBA_IMAGE = 1 << 1,
 } predict_flags;
 
 
@@ -107,9 +111,20 @@ static int FindMaxIndex(const float *Data, int Count)
 
 static bool Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int ExpectedDigit, predict_flags Flags, float TruePositiveThreshold)
 {
-    for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
+    if (Flags & PREDICT_FLAG_RGBA_IMAGE)
     {
-        g_FpNNInputs[i] = Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
+        for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
+        {
+            g_FpNNInputs[i] = Image[i*4] * (1.0 / 255.0);
+        }
+    }
+    else
+    {
+        /* straightforward for the compiler to do simd optimization, can't be bothered */
+        for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
+        {
+            g_FpNNInputs[i] = Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
+        }
     }
 
     NeuralNet_FeedForward(NN, &(neuralnet_feedforward_config) {
@@ -127,7 +142,8 @@ static bool Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int
             .LearningRate = LearningRate,
         });
     }
-    bool IsCorrect = FindMaxIndex(NeuralNet_GetOutput(NN), DIGIT_COUNT) == ExpectedDigit;
+    const float *Outputs = NeuralNet_GetOutput(NN);
+    bool IsCorrect = FindMaxIndex(Outputs, DIGIT_COUNT) == ExpectedDigit && Outputs[ExpectedDigit] > TruePositiveThreshold;
     return IsCorrect;
 }
 
@@ -186,7 +202,7 @@ int main(int ArgumentCount, char **Arguments)
     const char *TrainingFileName = "mnist_train.csv";
     const char *TestingFileName = "mnist_test.csv";
     const char *RandomPredictionFileName = "p.bmp";
-    const char *InputFileName = "i.png";
+    const char *InputFileName = "input";
 
     /* config */
     float TruePositiveThreshold = 0.7;
@@ -194,9 +210,8 @@ int main(int ArgumentCount, char **Arguments)
     float LearningRate = 1.0;
     // https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
-        [0] = 128,
-        [1] = 64,
-        [2] = DIGIT_COUNT, /* output layer */
+        [0] = 16,
+        [1] = DIGIT_COUNT, /* output layer */
     };
 
     int TrainingSampleCount = 60000; /* mnist_train.csv contains 60k training samples */
@@ -245,20 +260,25 @@ int main(int ArgumentCount, char **Arguments)
 
             case 'T': /* train all */
             {
+                int SampleCount = 0;
                 int TruePositiveCount = 0;
                 int Digit = 0;
                 double Start = clock();
-                for (int i = 0; i < TrainingSampleCount; i++)
                 {
-                    const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
-                    Digit = TrainingData.Labels[i];
-                    printf("\rTraining in progress: %d/%d, precision: %4.2f%%", i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
-                    TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
+                    for (int i = 0; i < TrainingSampleCount; i++)
+                    {
+                        const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
+                        Digit = TrainingData.Labels[i];
+                        printf("\rTraining in progress: %d/%d, precision: %4.2f%%", i, TrainingSampleCount, (float)TruePositiveCount / (SampleCount + 1) * 100);
+                        bool Correct = Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
+                        TruePositiveCount += Correct;
+                        SampleCount++;
+                    }
                 }
                 double Dt = (clock() - Start) / CLOCKS_PER_SEC;
                 printf("\ntime: %fs\n", Dt);
 
-                PrintVerdict(&NN, TrainingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+                PrintVerdict(&NN, SampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
             } break;
             case 'p': /* predict a random sample from test suite */
             {
@@ -287,6 +307,45 @@ int main(int ArgumentCount, char **Arguments)
             } break;
             case 'i':
             {
+                int Digit = getc(stdin) - '0';
+
+                int RequiredChannels = 4;
+                int Width = 0, Height = 0, Channels = 0;
+                static char TmpFileName[128];
+                snprintf(TmpFileName, sizeof TmpFileName, "%s%d.png", InputFileName, Digit);
+                uint8_t *Data = stbi_load(TmpFileName, &Width, &Height, &Channels, RequiredChannels);
+                if (Data)
+                {
+                    if (Width != IMAGE_WIDTH && Height != IMAGE_HEIGHT)
+                    {
+                        uint8_t *NewData = malloc(IMAGE_PIXEL_COUNT*RequiredChannels);
+                        ASSERTF(NewData, "Out of memory");
+
+                        Image_Resize(&(image_resize_config) {
+                            .Dst = NewData,
+                            .DstWidth = IMAGE_WIDTH,
+                            .DstHeight = IMAGE_HEIGHT,
+                            .Src = Data,
+                            .SrcWidth = Width, 
+                            .SrcHeight = Height,
+                            .Format = IMAGE_PIXEL_FORMAT_RGBA32,
+                            .Method = IMAGE_RESIZE_METHOD_NEAREST_NEIGHBOR,
+                        });
+
+                        free(Data);
+                        Width = IMAGE_WIDTH;
+                        Height = IMAGE_HEIGHT;
+                        Data = NewData;
+                    }
+                    bool IsCorrect = Predict(&NN, LearningRate, Data, Digit, PREDICT_FLAG_RGBA_IMAGE | PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
+                    PrintVerdict(&NN, 1, IsCorrect, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+                    stbi_write_bmp(RandomPredictionFileName, Width, Height, Channels, Data);
+                    free(Data);
+                }
+                else
+                {
+                    printf("Unable to load '%s'\n", TmpFileName);
+                }
             } break;
             }
         }
