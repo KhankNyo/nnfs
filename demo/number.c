@@ -172,11 +172,13 @@ static void PrintVerdict(neuralnet *NN, int TotalSample, int TruePositiveCount, 
     printf("Precision: %4.2f%% (%d/%d)\n", Precision * 100, TruePositiveCount, TotalSample);
 
     neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
-    printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f\n", 
+    float Loss = NeuralNet_CalcLoss(NN, g_FpNNExpectedOutputs, DIGIT_COUNT);
+    printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f, loss: %f\n", 
         Stats.WeightMin,
         Stats.WeightMax,
         Stats.BiasMin,
-        Stats.BiasMax
+        Stats.BiasMax,
+	Loss
     );
     printf("----------------------------\n");
 }

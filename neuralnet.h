@@ -75,6 +75,7 @@ void NeuralNet_Randomize(neuralnet *NN);
 void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config);
 void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config);
 neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN);
+float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount);
 
 void NeuralNet_Print(const neuralnet *NN);
 float *NeuralNet_GetOutput(neuralnet *NN);
@@ -356,6 +357,19 @@ neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
     }
     return Stats;
 }
+
+float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount)
+{
+    float Result = 0;
+    const float *Outputs = NeuralNet_GetOutput(NN);
+    for (int i = 0; i < OutputCount; i++)
+    {
+        float Tmp = (ExpectedOutputs[i] - Outputs[i]);
+	Result += Tmp*Tmp;
+    }
+    return Result;
+}
+
 
 void NeuralNet_Print(const neuralnet *NN)
 {
