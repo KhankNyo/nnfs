@@ -358,16 +358,17 @@ neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
     return Stats;
 }
 
+/* MSE */
 float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount)
 {
-    float Result = 0;
+    float Sum = 0;
     const float *Outputs = NeuralNet_GetOutput(NN);
     for (int i = 0; i < OutputCount; i++)
     {
         float Tmp = (ExpectedOutputs[i] - Outputs[i]);
-	Result += Tmp*Tmp;
+        Sum += Tmp*Tmp;
     }
-    return Result;
+    return Sum / OutputCount;
 }
 
 

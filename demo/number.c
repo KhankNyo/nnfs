@@ -34,13 +34,6 @@
     }\
 } while (0)
 
-typedef struct
-{
-    int Count;
-    int *Labels;
-    uint8_t *Samples;
-    void *Arena; /* only call free on arena since it owns the memory of Labels and Data */
-} data;
 
 typedef enum 
 {
@@ -49,9 +42,47 @@ typedef enum
     PREDICT_FLAG_RGBA_IMAGE = 1 << 1,
 } predict_flags;
 
+typedef struct
+{
+    int Count;
+    int *Labels;
+    uint8_t *Samples;
+    void *Arena; /* only call free on arena since it owns the memory of Labels and Data */
+} data;
+
+typedef struct
+{
+    predict_flags Flags;
+
+    float LearningRate;
+    const uint8_t *Image;
+    int Label;
+
+    float *OutLoss;
+} predict_params;
+
+typedef struct
+{
+    float FalseNegativeThreshold;
+    float TruePositiveThreshold;
+    int TruePositiveCount;
+
+    int SampleCount;
+    int *Labels;
+    float *Loss;
+} verdict_config;
+
 
 static float g_FpNNInputs[IMAGE_PIXEL_COUNT];
 static float g_FpNNExpectedOutputs[DIGIT_COUNT];
+
+
+static void *AllocateMemory(size_t ByteCount)
+{
+    void *Ptr = malloc(ByteCount);
+    ASSERTF(Ptr, "Out of memory trying to allocate %fkb.", (float)ByteCount / KB);
+    return Ptr;
+}
 
 
 static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidth, int ImageHeight)
@@ -64,9 +95,7 @@ static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidt
     {
         int AllocSize = SampleCount
             * (sizeof(Data.Labels[0]) + ImageWidth*ImageHeight);
-        Data.Arena = malloc(AllocSize);
-        ASSERTF(Data.Arena, "Out of memory trying to allocate %dkb\n", AllocSize / KB);
-
+        Data.Arena = AllocateMemory(AllocSize);
         Data.Labels = Data.Arena;
         Data.Samples = (void *)(Data.Labels + SampleCount);
 
@@ -109,13 +138,13 @@ static int FindMaxIndex(const float *Data, int Count)
     return MaxIndex;
 }
 
-static bool Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int ExpectedDigit, predict_flags Flags, float TruePositiveThreshold)
+static bool Predict(neuralnet *NN, predict_params *Params)
 {
-    if (Flags & PREDICT_FLAG_RGBA_IMAGE)
+    if (Params->Flags & PREDICT_FLAG_RGBA_IMAGE)
     {
         for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
         {
-            g_FpNNInputs[i] = Image[i*4] * (1.0 / 255.0);
+            g_FpNNInputs[i] = Params->Image[i*4] * (1.0 / 255.0);
         }
     }
     else
@@ -123,7 +152,7 @@ static bool Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int
         /* straightforward for the compiler to do simd optimization, can't be bothered */
         for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
         {
-            g_FpNNInputs[i] = Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
+            g_FpNNInputs[i] = Params->Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
         }
     }
 
@@ -133,60 +162,104 @@ static bool Predict(neuralnet *NN, float LearningRate, const uint8_t *Image, int
     });
 
     memset(g_FpNNExpectedOutputs, 0, sizeof g_FpNNExpectedOutputs);
-    g_FpNNExpectedOutputs[ExpectedDigit] = 1.0;
-    if (Flags & PREDICT_FLAG_ENABLE_BACKPROP)
+    g_FpNNExpectedOutputs[Params->Label] = 1.0;
+    if (Params->Flags & PREDICT_FLAG_ENABLE_BACKPROP)
     {
         NeuralNet_Backprop(NN, &(neuralnet_backprop_config) {
             .ExpectedOutputCount = DIGIT_COUNT,
             .ExpectedOutputs = g_FpNNExpectedOutputs,
-            .LearningRate = LearningRate,
+            .LearningRate = Params->LearningRate,
         });
     }
+    if (Params->OutLoss)
+    {
+        *Params->OutLoss = NeuralNet_CalcLoss(NN, g_FpNNExpectedOutputs, DIGIT_COUNT);
+    }
+
     const float *Outputs = NeuralNet_GetOutput(NN);
-    bool IsCorrect = FindMaxIndex(Outputs, DIGIT_COUNT) == ExpectedDigit && Outputs[ExpectedDigit] > TruePositiveThreshold;
+    bool IsCorrect = FindMaxIndex(Outputs, DIGIT_COUNT) == Params->Label;
     return IsCorrect;
 }
 
-static void PrintVerdict(neuralnet *NN, int TotalSample, int TruePositiveCount, int Expected, float FalseNegativeThreshold, float TruePositiveThreshold)
+static void PrintVerdict(neuralnet *NN, const verdict_config *Config)
 {
     const float *Output = NeuralNet_GetOutput(NN);
-    printf("Expected:    [");
-    for (int i = 0; i < DIGIT_COUNT; i++)
-        printf("%4.3f ", g_FpNNExpectedOutputs[i]);
-    printf("]\n");
 
-    printf("Digits 0..9: [");
-    for (int i = 0; i < DIGIT_COUNT; i++)
-        printf("%4.3f ", Output[i]);
-    printf("], best guess: %d\n", FindMaxIndex(Output, DIGIT_COUNT));
-    printf("Correctness: [");
-    for (int i = 0; i < DIGIT_COUNT; i++)
+    if (Config->SampleCount == 1)
     {
-        if (i == Expected)
-            printf("  %c   ", Output[i] > TruePositiveThreshold? 'o' : 'X');
-        else
-            printf("  %c   ", Output[i] < FalseNegativeThreshold? '_' : 'x');
-    }
-    printf("]\n");
-    float Precision = (float)TruePositiveCount / (TotalSample);
-    printf("Precision: %4.2f%% (%d/%d)\n", Precision * 100, TruePositiveCount, TotalSample);
+        printf("Best guess: %d\n", FindMaxIndex(Output, DIGIT_COUNT));
+        printf("Expected:    [");
+        for (int i = 0; i < DIGIT_COUNT; i++)
+            printf("%4.3f ", g_FpNNExpectedOutputs[i]);
+        printf("]\n");
 
-    neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
-    float Loss = NeuralNet_CalcLoss(NN, g_FpNNExpectedOutputs, DIGIT_COUNT);
-    printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f, loss: %f\n", 
-        Stats.WeightMin,
-        Stats.WeightMax,
-        Stats.BiasMin,
-        Stats.BiasMax,
-	Loss
-    );
+        printf("Digits 0..9: [");
+        for (int i = 0; i < DIGIT_COUNT; i++)
+            printf("%4.3f ", Output[i]);
+        printf("]\n");
+        printf("Correctness: [");
+        for (int i = 0; i < DIGIT_COUNT; i++)
+        {
+            if (i == Config->Labels[Config->SampleCount - 1])
+                printf("  %c   ", Output[i] > Config->TruePositiveThreshold? 'o' : 'X');
+            else
+                printf("  %c   ", Output[i] < Config->FalseNegativeThreshold? '_' : 'x');
+        }
+        printf("]\n");
+    }
+    float Precision = (float)Config->TruePositiveCount / (Config->SampleCount);
+    printf("Precision: %4.2f%% (%d/%d)\n", Precision * 100, Config->TruePositiveCount, Config->SampleCount);
+
+    /* param stats */
+    {
+        neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
+        printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f\n", 
+            Stats.WeightMin,
+            Stats.WeightMax,
+            Stats.BiasMin,
+            Stats.BiasMax
+        );
+    }
+
+    /* calc avg loss */
+    {
+        int LabelCounts[DIGIT_COUNT] = { 0 };
+        float AvgLosses[DIGIT_COUNT] = { 0 };
+        for (int i = 0; i < Config->SampleCount; i++)
+        {
+            int Label = Config->Labels[i];
+            float *LabelLoss = &AvgLosses[Label];
+            int *LabelCount = &LabelCounts[Label];
+
+            *LabelLoss += Config->Loss[i];
+            *LabelCount += 1;
+        }
+        for (int i = 0; i < DIGIT_COUNT; i++)
+        {
+            if (LabelCounts[i] > 1)
+                AvgLosses[i] /= (float)LabelCounts[i];
+        }
+
+        if (Config->SampleCount == 1)
+        {
+            printf("Loss = %f\n", AvgLosses[Config->Labels[0]]);
+        }
+        else
+        {
+            printf("AvgLoss:     [");
+            for (int i = 0; i < DIGIT_COUNT; i++)
+            {
+                printf("%4.3f ", AvgLosses[i]);
+            }
+            printf("]\n");
+        }
+    }
     printf("----------------------------\n");
 }
 
 static void WriteTestSampleToFile(const char *FileName, const uint8_t *Data)
 {
-    uint32_t *Image = malloc(IMAGE_PIXEL_COUNT*sizeof(Image[0]));
-    ASSERTF(Image, "Out of memory trying to allocate %dkb\n", (int)(IMAGE_WIDTH*IMAGE_HEIGHT*sizeof(Image[0]) / KB));
+    uint32_t *Image = AllocateMemory(IMAGE_PIXEL_COUNT*sizeof(Image[0]));
     for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
     {
         Image[i] = 0xFF000000 | Data[i] | (uint32_t)Data[i] << 8 | (uint32_t)Data[i] << 16;
@@ -209,7 +282,7 @@ int main(int ArgumentCount, char **Arguments)
     /* config */
     float TruePositiveThreshold = 0.7;
     float FalseNegativeThreshold = 0.3;
-    float LearningRate = 1.0;
+    float LearningRate = 0.1;
     // https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
         [0] = 16,
@@ -220,6 +293,8 @@ int main(int ArgumentCount, char **Arguments)
     int TestingSampleCount = 10000;
     data TrainingData = { 0 };
     data TestingData = { 0 };
+    float *TrainingLoss = NULL;
+    float *TestingLoss = NULL;
     {
         printf("Loading training data...\n");
         TrainingData = LoadTrainingCSV(TrainingFileName, TrainingSampleCount, IMAGE_WIDTH, IMAGE_HEIGHT);
@@ -227,6 +302,9 @@ int main(int ArgumentCount, char **Arguments)
         printf("Loading testing data...\n");
         TestingData = LoadTrainingCSV(TestingFileName, TestingSampleCount, IMAGE_WIDTH, IMAGE_HEIGHT);
         printf("%d testing samples loaded\n", TestingSampleCount);
+
+        TrainingLoss = AllocateMemory(TrainingSampleCount * sizeof(TrainingLoss[0]));
+        TestingLoss = AllocateMemory(TestingSampleCount * sizeof(TestingLoss[0]));
 
         neuralnet NN = NeuralNet_Create(&(neuralnet_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
@@ -247,10 +325,13 @@ int main(int ArgumentCount, char **Arguments)
             case 'h':
             {
                 printf(
-                    "q - quit\n"
-                    "T - train all from training sample '%s'\n"
-                    "p - predict a random sample from test suite '%s'\n"
-                    "P - predict all from test suite '%s'\n",
+                    "q    - quit\n"
+                    "i[n] - predict from given image with the name '%s[n].png',\n"
+                    "         ex: 'input0.png' for image with number 0, command: 'i0'.\n"
+                    "T    - train all from training sample '%s'\n"
+                    "p    - predict a random sample from test suite '%s'\n"
+                    "P    - predict all from test suite '%s'\n",
+                    InputFileName,
                     TrainingFileName,
                     TestingFileName, 
                     TestingFileName
@@ -260,27 +341,41 @@ int main(int ArgumentCount, char **Arguments)
             case 'q':
                 goto Out;
 
-            case 'T': /* train all */
+            case 'T': /* train all (training dataset) */
             {
-                int SampleCount = 0;
                 int TruePositiveCount = 0;
-                int Digit = 0;
                 double Start = clock();
                 {
                     for (int i = 0; i < TrainingSampleCount; i++)
                     {
                         const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
-                        Digit = TrainingData.Labels[i];
-                        printf("\rTraining in progress: %d/%d, precision: %4.2f%%", i, TrainingSampleCount, (float)TruePositiveCount / (SampleCount + 1) * 100);
-                        bool Correct = Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
+                        int Digit = TrainingData.Labels[i];
+                        printf("\rTraining in progress: %d/%d, precision: %4.2f%%", 
+                            i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100
+                        );
+                        bool Correct = Predict(&NN, &(predict_params) {
+                            .Flags = PREDICT_FLAG_ENABLE_BACKPROP,
+                            .LearningRate = LearningRate, 
+                            .Image = Sample,
+                            .Label = Digit, 
+
+                            .OutLoss = &TrainingLoss[i],
+                        });
                         TruePositiveCount += Correct;
-                        SampleCount++;
                     }
                 }
                 double Dt = (clock() - Start) / CLOCKS_PER_SEC;
                 printf("\ntime: %fs\n", Dt);
 
-                PrintVerdict(&NN, SampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+                PrintVerdict(&NN, &(verdict_config) {
+                    .TruePositiveCount = TruePositiveCount,
+                    .FalseNegativeThreshold = FalseNegativeThreshold,
+                    .TruePositiveThreshold = TruePositiveThreshold,
+
+                    .SampleCount = TrainingSampleCount,
+                    .Labels = TrainingData.Labels,
+                    .Loss = TrainingLoss,
+                });
             } break;
             case 'p': /* predict a random sample from test suite */
             {
@@ -291,23 +386,52 @@ int main(int ArgumentCount, char **Arguments)
                 WriteTestSampleToFile(RandomPredictionFileName, Sample);
                 printf("Wrote test sample to '%s'\n", RandomPredictionFileName);
 
-                bool Correct = Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_NONE, TruePositiveThreshold);
-                PrintVerdict(&NN, 1, Correct, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+                float Loss = 0;
+                bool Correct = Predict(&NN, &(predict_params) {
+                    .LearningRate = LearningRate, 
+                    .Image = Sample, 
+                    .Label = Digit,
+
+                    .OutLoss = &Loss,
+                });
+                PrintVerdict(&NN, &(verdict_config) {
+                    .TruePositiveCount = Correct,
+                    .FalseNegativeThreshold = FalseNegativeThreshold,
+                    .TruePositiveThreshold = TruePositiveThreshold,
+
+                    .SampleCount = 1,
+                    .Labels = &Digit,
+                    .Loss = &Loss,
+                });
             } break;
-            case 'P': /* predict all */
+            case 'P': /* predict all (testing dataset) */
             {
                 int TruePositiveCount = 0;
-                int Digit = 0;
                 for (int i = 0; i < TestingSampleCount; i++)
                 {
                     const uint8_t *Sample = TestingData.Samples + i*IMAGE_PIXEL_COUNT;
-                    Digit = TestingData.Labels[i];
+                    int Digit = TestingData.Labels[i];
+
                     printf("Testing in progress: %d/%d, precision: %4.2f%%\r", i, TestingSampleCount, (float)TruePositiveCount / (i + 1) * 100);
-                    TruePositiveCount += Predict(&NN, LearningRate, Sample, Digit, PREDICT_FLAG_NONE, TruePositiveThreshold);
+                    TruePositiveCount += Predict(&NN, &(predict_params) {
+                        .LearningRate = LearningRate, 
+                        .Image = Sample, 
+                        .Label = Digit,
+
+                        .OutLoss = &TestingLoss[i],
+                    });
                 }
-                PrintVerdict(&NN, TestingSampleCount, TruePositiveCount, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+                PrintVerdict(&NN, &(verdict_config) {
+                    .TruePositiveCount = TruePositiveCount,
+                    .FalseNegativeThreshold = FalseNegativeThreshold,
+                    .TruePositiveThreshold = TruePositiveThreshold,
+
+                    .SampleCount = TestingSampleCount,
+                    .Labels = TestingData.Labels,
+                    .Loss = TestingLoss,
+                });
             } break;
-            case 'i':
+            case 'i': /* input image */
             {
                 int Digit = getc(stdin) - '0';
 
@@ -320,8 +444,8 @@ int main(int ArgumentCount, char **Arguments)
                 {
                     if (Width != IMAGE_WIDTH && Height != IMAGE_HEIGHT)
                     {
-                        uint8_t *NewData = malloc(IMAGE_PIXEL_COUNT*RequiredChannels);
-                        ASSERTF(NewData, "Out of memory");
+                        /* resize image */
+                        uint8_t *NewData = AllocateMemory(IMAGE_PIXEL_COUNT*RequiredChannels);
 
                         Image_Resize(&(image_resize_config) {
                             .Dst = NewData,
@@ -339,8 +463,28 @@ int main(int ArgumentCount, char **Arguments)
                         Height = IMAGE_HEIGHT;
                         Data = NewData;
                     }
-                    bool IsCorrect = Predict(&NN, LearningRate, Data, Digit, PREDICT_FLAG_RGBA_IMAGE | PREDICT_FLAG_ENABLE_BACKPROP, TruePositiveThreshold);
-                    PrintVerdict(&NN, 1, IsCorrect, Digit, FalseNegativeThreshold, TruePositiveThreshold);
+
+                    float Loss = 0;
+                    bool IsCorrect = Predict(&NN, &(predict_params) {
+                        .Flags = PREDICT_FLAG_RGBA_IMAGE | PREDICT_FLAG_ENABLE_BACKPROP,
+
+                        .LearningRate = LearningRate, 
+                        .Image = Data, 
+                        .Label = Digit,
+
+                        .OutLoss = &Loss,
+                    });
+                    PrintVerdict(&NN, &(verdict_config) {
+                        .TruePositiveCount = IsCorrect,
+                        .FalseNegativeThreshold = FalseNegativeThreshold,
+                        .TruePositiveThreshold = TruePositiveThreshold,
+
+                        .SampleCount = 1,
+                        .Labels = &Digit,
+                        .Loss = &Loss,
+                    });
+
+                    /* write out training image (diff name) since it could've been resized */
                     stbi_write_bmp(RandomPredictionFileName, Width, Height, Channels, Data);
                     free(Data);
                 }
@@ -356,6 +500,7 @@ Out:
     }
     free(TrainingData.Arena);
     free(TestingData.Arena);
+    free(TrainingLoss);
     return 0;
 }
 
