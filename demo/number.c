@@ -213,11 +213,9 @@ static void PrintVerdict(neuralnet *NN, const verdict_config *Config)
     /* param stats */
     {
         neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
-        printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f\n", 
+        printf("wmin: %f, wmax: %f\n", 
             Stats.WeightMin,
-            Stats.WeightMax,
-            Stats.BiasMin,
-            Stats.BiasMax
+            Stats.WeightMax
         );
     }
 
@@ -272,7 +270,8 @@ static void WriteTestSampleToFile(const char *FileName, const uint8_t *Data)
 
 int main(int ArgumentCount, char **Arguments)
 {
-    srand(time(NULL));
+    srand(time(NULL)); /* uncomment for random weight and bias initialization values */
+
     /* https://github.com/phoebetronic/mnist/tree/main */
     const char *TrainingFileName = "mnist_train.csv";
     const char *TestingFileName = "mnist_test.csv";
@@ -283,9 +282,9 @@ int main(int ArgumentCount, char **Arguments)
     float TruePositiveThreshold = 0.7;
     float FalseNegativeThreshold = 0.3;
     float LearningRate = 0.1;
-    // https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/
+    /* https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/ */
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
-        [0] = 16,
+        [0] = 32,
         [1] = DIGIT_COUNT, /* output layer */
     };
 
@@ -501,6 +500,7 @@ Out:
     free(TrainingData.Arena);
     free(TestingData.Arena);
     free(TrainingLoss);
+    free(TestingLoss);
     return 0;
 }
 

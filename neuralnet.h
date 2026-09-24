@@ -48,7 +48,6 @@ struct neuralnet_feedforward_config
 struct neuralnet_param_stats
 {
     float WeightMin, WeightMax;
-    float BiasMin, BiasMax;
 };
 
 /* memory allocation is not the focal point here, but since we're in C,
@@ -83,6 +82,7 @@ float *NeuralNet_GetOutput(neuralnet *NN);
 
 struct neuralnet
 {
+    int InputCountB;
     int InputCount;
     float *Inputs;
     float *ScratchMatrix;
@@ -96,13 +96,13 @@ struct neuralnet
 
 struct neuralnet_layer
 {
+    int InputCountB;
     int InputCount;
     int OutputCount;
     /* [Input x Output matrix] */
     float *Weights;
 
     /* [array with length of OutputCount] */
-    float *Biases;
     float *Outputs;
     float *Deltas;
 };
@@ -155,6 +155,7 @@ struct neuralnet_layer
 
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param);
 static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col);
+static float NN__DotProduct(const float *A, const float *B, int Length);
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT);
 static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col);
 static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col);
@@ -168,6 +169,7 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
     assert(Config->LayerCount >= 1 && "must have at leaast 1 layer (output layer)");
     neuralnet NN = { 
         .InputCount = Config->InputCount,
+        .InputCountB = Config->InputCount + 1,
         .LayerCount = Config->LayerCount,
     };
     if (Config->AllocatorCallback != NULL)
@@ -183,23 +185,25 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
 
     /* allocate needed mem */
     {
-        NN.Inputs = NN__ALLOC(&NN, sizeof(NN.Inputs[0]) * NN.InputCount);
+        NN.Inputs = NN__ALLOC(&NN, sizeof(NN.Inputs[0]) * NN.InputCountB);
         NN.Layers = NN__ALLOC(&NN, sizeof(NN.Layers[0]) * NN.LayerCount);
-        int InputCount = Config->InputCount;
-        int LargestSide = InputCount;
+        int InputCount = NN.InputCount;
+        int InputCountB = NN.InputCountB;
+        int LargestSide = InputCountB;
         for (int i = 0; i < Config->LayerCount; i++)
         {
             int OutputCount = Config->NodeCountPerLayer[i];
 
-            NN.Layers[i].Weights = NN__ALLOC(&NN, OutputCount*InputCount*sizeof(NN.Layers[0].Weights[0]));
-            NN.Layers[i].Biases = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].Biases[0]));
-            NN.Layers[i].Outputs = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].Outputs[0]));
+            NN.Layers[i].Weights = NN__ALLOC(&NN, OutputCount*InputCountB*sizeof(NN.Layers[0].Weights[0]));
             NN.Layers[i].Deltas = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].Deltas[0]));
+            NN.Layers[i].Outputs = NN__ALLOC(&NN, (OutputCount + 1)*sizeof(NN.Layers[0].Outputs[0]));
             NN.Layers[i].InputCount = InputCount;
+            NN.Layers[i].InputCountB = InputCountB;
             NN.Layers[i].OutputCount = OutputCount;
 
-            LargestSide = NN__MAX(OutputCount, LargestSide);
             InputCount = OutputCount;
+            InputCountB = OutputCount + 1;
+            LargestSide = NN__MAX(OutputCount + 1, LargestSide);
         }
         NN.ScratchMatrix = NN__ALLOC(&NN, LargestSide*LargestSide*sizeof(NN.ScratchMatrix[0]));
     }
@@ -235,7 +239,6 @@ void NeuralNet_Destroy(neuralnet *NN)
     {
         NN__FREE(NN, NN->Layers[i].Weights);
         NN__FREE(NN, NN->Layers[i].Deltas);
-        NN__FREE(NN, NN->Layers[i].Biases);
         NN__FREE(NN, NN->Layers[i].Outputs);
     }
     NN__FREE(NN, NN->Layers);
@@ -253,8 +256,10 @@ void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Co
     if (Config->InputCount)
     {
         assert(Config->InputCount == NN->InputCount);
+        assert(Config->InputCount + 1 == NN->InputCountB);
         assert(Config->Inputs);
         memcpy(NN->Inputs, Config->Inputs, NN->InputCount * sizeof(NN->Inputs[0]));
+        NN->Inputs[NN->InputCountB - 1] = 1.0;
     }
     neuralnet_activation_fn ActivationFn = Config->ActivationFn;
     if (ActivationFn == NULL)
@@ -267,11 +272,13 @@ void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Co
     for (int i = 0; i < NN->LayerCount; i++)
     {
         neuralnet_layer *Layer = &NN->Layers[i];
+        assert(X[Layer->InputCountB - 1] == 1.0);
 
-        NN__LinearCombination(
-            Layer->Outputs, 
-            Layer->Weights, X, Layer->Biases,
-            Layer->InputCount, Layer->OutputCount
+        NN__MatMulABT(
+            Layer->Outputs,
+            Layer->Weights, X,
+            Layer->InputCountB, Layer->OutputCount,
+            1
         );
 
         /* NOTE: normalize outputs via activation fn ("squish" Y from -inf..+inf to 0..1) */
@@ -286,57 +293,56 @@ void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Co
 
 void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config)
 {
-    /* compute output layer deltas */
+    /* deltas */
     {
         const neuralnet_layer *Last = NN->Layers + NN->LayerCount - 1;
         assert(Config->ExpectedOutputCount == Last->OutputCount);
 
+        /* compute output layer deltas */
         for (int i = 0; i < Last->OutputCount; i++)
         {
             float Error = Last->Outputs[i] - Config->ExpectedOutputs[i];
-            Last->Deltas[i] = Error * NN__SigmoidDerivativeY(Last->Outputs[i]);
+            /* NOTE: hack, learning rate should be present during weight/bias update, not during delta calculation */
+            Last->Deltas[i] = Config->LearningRate * Error * NN__SigmoidDerivativeY(Last->Outputs[i]);
         }
-    }
 
-    /* compute hidden layer deltas */
-    for (int i = NN->LayerCount - 2; i >= 0; i--)
-    {
-        neuralnet_layer *Curr = NN->Layers + i + 1;
-        neuralnet_layer *Prev = NN->Layers + i;
-
-        int Col = 1;
-        NN__MatMulABT(
-            Prev->Deltas, 
-            Curr->Deltas, Curr->Weights, 
-            Curr->OutputCount, Col, 
-            Curr->InputCount
-        );
-        for (int k = 0; k < Prev->OutputCount; k++)
+        /* compute hidden layer deltas */
+        for (int i = NN->LayerCount - 2; i >= 0; i--)
         {
-            Prev->Deltas[k] *= Config->LearningRate * NN__SigmoidDerivativeY(Prev->Outputs[k]);
+            neuralnet_layer *Next = NN->Layers + i + 1;
+            neuralnet_layer *Curr = NN->Layers + i;
+
+            NN__MatTranpose(NN->ScratchMatrix, Next->Weights, Next->InputCountB, Next->OutputCount);
+            NN__MatMulABT(
+                Curr->Deltas, 
+                NN->ScratchMatrix, Next->Deltas, 
+                Next->OutputCount, Next->InputCountB, 1
+            );
+            for (int k = 0; k < Next->InputCountB; k++)
+            {
+                float Tmp = Config->LearningRate * NN__SigmoidDerivativeY(Curr->Outputs[k]);
+                Curr->Deltas[k] *= Tmp;
+            }
         }
     }
 
     /* update weights and biases */
-    int InputCount = NN->InputCount;
+    int InputCountB = NN->InputCountB;
     float *Inputs = NN->Inputs;
     for (int i = 0; i < NN->LayerCount; i++)
     {
         neuralnet_layer *Curr = NN->Layers + i;
-        NN__MatMulABT(NN->ScratchMatrix, Curr->Deltas, Inputs, 1, Curr->OutputCount, InputCount);
-        NN__MatSubInPlace(Curr->Weights, NN->ScratchMatrix, InputCount, Curr->OutputCount);
-        NN__MatSubInPlace(Curr->Biases, Curr->Deltas, Curr->OutputCount, 1);
+        NN__MatMulABT(NN->ScratchMatrix, Curr->Deltas, Inputs, 1, Curr->OutputCount, InputCountB);
+        NN__MatSubInPlace(Curr->Weights, NN->ScratchMatrix, InputCountB, Curr->OutputCount);
 
         Inputs = Curr->Outputs;
-        InputCount = Curr->OutputCount;
+        InputCountB = Curr->OutputCount + 1;
     }
 }
 
 neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
 {
     neuralnet_param_stats Stats = { 
-        .BiasMax = -FLT_MAX,
-        .BiasMin = FLT_MAX,
         .WeightMax = -FLT_MAX,
         .WeightMin = FLT_MAX,
     };
@@ -345,8 +351,6 @@ neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
         neuralnet_layer *Layer = NN->Layers + i;
         for (int k = 0; k < Layer->OutputCount; k++)
         {
-            Stats.BiasMax = NN__MAX(Stats.BiasMax, Layer->Biases[k]);
-            Stats.BiasMin = NN__MIN(Stats.BiasMin, Layer->Biases[k]);
             for (int j = 0; j < Layer->InputCount; j++)
             {
                 int Index = k*Layer->InputCount + j;
@@ -388,13 +392,8 @@ void NeuralNet_Print(const neuralnet *NN)
         printf("    layer %d: in/out: %d/%d\n", i, Layer->InputCount, Layer->OutputCount);
 
         printf("        node vals:  [ ");
-        for (int k = 0; k < Layer->OutputCount; k++)
+        for (int k = 0; k < Layer->OutputCount + 1; k++)
             printf("%6.3f ", Layer->Outputs[k]);
-        printf("]\n");
-
-        printf("        node bias:  [ ");
-        for (int k = 0; k < Layer->OutputCount; k++)
-            printf("%6.3f ", Layer->Biases[k]);
         printf("]\n");
 
         printf("        node delta: [ ");
@@ -406,9 +405,9 @@ void NeuralNet_Print(const neuralnet *NN)
         for (int k = 0; k < Layer->OutputCount; k++)
         {
             printf("            [ ");
-            for (int j = 0; j < Layer->InputCount; j++)
+            for (int j = 0; j < Layer->InputCountB; j++)
             {
-                printf("%6.3f ", Layer->Weights[j + k*Layer->OutputCount]);
+                printf("%6.3f ", Layer->Weights[j + k*Layer->InputCountB]);
             }
             printf("]\n");
         }
@@ -422,19 +421,22 @@ void NeuralNet_Print(const neuralnet *NN)
 
 void NeuralNet_Randomize(neuralnet *NN)
 {
+    /* NOTE: for biases */
+    NN->Inputs[NN->InputCountB - 1] = 1.0;
     for (int n = 0; n < NN->LayerCount; n++)
     {
         neuralnet_layer *Layer = &NN->Layers[n];
         for (int k = 0; k < Layer->OutputCount; k++)
         {
-            Layer->Biases[k] = NN__GetRandomValue();
+            //Layer->Biases[k] = NN__GetRandomValue();
             Layer->Outputs[k] = NN__GetRandomValue();
-            Layer->Deltas[k] = NN__GetRandomValue();
             for (int i = 0; i < Layer->InputCount; i++)
             {
                 Layer->Weights[k*Layer->InputCount + i] = NN__GetRandomValue();
             }
         }
+        /* NOTE: for biases */
+        Layer->Outputs[Layer->OutputCount] = 1.0;
     }
 }
 
@@ -552,20 +554,6 @@ static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
 }
 #endif
 
-
-/* NOTE: Y = M . X + B
- * [Y_0]   [TM_00 TM_0r]   [X_0]   [B_0]
- * [Y_c] = [TM_c0 TM_cr] . [X_r] + [B_c]
- */
-static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col)
-{
-    for (int c = 0; c < Col; c++)
-    {
-        const float *MatrixRow = M + c*Row;
-        float Dp = NN__DotProduct(MatrixRow, X, Row);
-        Y[c] = Dp + B[c];
-    }
-}
 
 /* NOTE: Y = A . B^T */
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
