@@ -147,13 +147,6 @@ struct neuralnet_layer
     )
 
 #define NN__SIMD_VEC_LEN 8
-#define NN__ALLOCATION_SCOPE_BEGIN(p_nn) 0
-#define NN__ALLOCATION_SCOPE_END(p_nn) 0
-#define NN__ALLOCATION_SCOPE(p_nn) for (\
-        int nn__alloc_scope = (NN__ALLOCATION_SCOPE_BEGIN(p_nn), 1); \
-        nn__alloc_scope; \
-        NN__ALLOCATION_SCOPE_END(p_nn), (nn__alloc_scope = 0)\
-    )
 #define NN__MAX(a, b) ((a) > (b)? (a) : (b))
 #define NN__MIN(a, b) ((a) < (b)? (a) : (b))
 
