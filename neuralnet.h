@@ -613,9 +613,9 @@ static void NN__MatScaleInPlace(float *Mat, float Scale, int Stride, int Row, in
 /* NOTE: Y = A . B^T */
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
 {
-    for (int Rtb = 0; Rtb < RowBT; Rtb++)
+    for (int Ca = 0; Ca < ColA; Ca++)
     {
-        for (int Ca = 0; Ca < ColA; Ca++)
+        for (int Rtb = 0; Rtb < RowBT; Rtb++)
         {
             const float *RowMatA = A + Ca*RowA;
             const float *ColMatB = BT + Rtb*RowA;
