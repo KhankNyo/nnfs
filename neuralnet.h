@@ -50,6 +50,7 @@ struct neuralnet_feedforward_config
 struct neuralnet_param_stats
 {
     float WeightMin, WeightMax;
+    float BiasMin, BiasMax;
 };
 
 /* memory allocation is not the focal point here, but since we're in C,
@@ -161,7 +162,7 @@ static float NN__DotProduct(const float *A, const float *B, int Length);
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT);
 static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col);
 static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col);
-static void NN__MatScaleInPlace(float *Mat, float Scale, int Row, int Col);
+static void NN__MatScaleInPlace(float *Mat, float Scale, int Stride, int Row, int Col);
 static float NN__GetRandomValue(void);
 static float NN__Sigmoid(float Value);
 static float NN__SigmoidDerivativeY(float Y);
@@ -332,16 +333,19 @@ void NeuralNet_Backprop(neuralnet *NN, neuralnet_backprop_config *Config)
     float L2Regularization = 1.0 - Config->L2Lambda;
 
     /* update weights and biases */
+    int InputCount = NN->InputCount;
     int InputCountB = NN->InputCountB;
     float *Inputs = NN->Inputs;
     for (int i = 0; i < NN->LayerCount; i++)
     {
         neuralnet_layer *Curr = NN->Layers + i;
         NN__MatMulABT(NN->ScratchMatrix, Curr->Deltas, Inputs, 1, Curr->OutputCount, InputCountB);
-        NN__MatScaleInPlace(Curr->Weights, L2Regularization, InputCountB, Curr->OutputCount);
+        /* NOTE: scaling the weights will not affect biases because InputCountB is the stride, InputCount is the row length */
+        NN__MatScaleInPlace(Curr->Weights, L2Regularization, InputCountB, InputCount, Curr->OutputCount);
         NN__MatSubInPlace(Curr->Weights, NN->ScratchMatrix, InputCountB, Curr->OutputCount);
 
         Inputs = Curr->Outputs;
+        InputCount = Curr->OutputCount;
         InputCountB = Curr->OutputCount + 1;
     }
 }
@@ -349,6 +353,8 @@ void NeuralNet_Backprop(neuralnet *NN, neuralnet_backprop_config *Config)
 neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
 {
     neuralnet_param_stats Stats = { 
+        .BiasMax = -FLT_MAX,
+        .BiasMin = FLT_MAX,
         .WeightMax = -FLT_MAX,
         .WeightMin = FLT_MAX,
     };
@@ -357,12 +363,16 @@ neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
         neuralnet_layer *Layer = NN->Layers + i;
         for (int k = 0; k < Layer->OutputCount; k++)
         {
+            int Col = k*Layer->InputCountB;
             for (int j = 0; j < Layer->InputCount; j++)
             {
-                int Index = k*Layer->InputCount + j;
+                int Index = Col + j;
                 Stats.WeightMax = NN__MAX(Stats.WeightMax, Layer->Weights[Index]);
                 Stats.WeightMin = NN__MIN(Stats.WeightMin, Layer->Weights[Index]);
             }
+
+            Stats.BiasMax = NN__MAX(Stats.BiasMax, Layer->Weights[Col + Layer->InputCountB - 1]);
+            Stats.BiasMin = NN__MIN(Stats.BiasMin, Layer->Weights[Col + Layer->InputCountB - 1]);
         }
     }
     return Stats;
@@ -469,11 +479,10 @@ void NeuralNet_Randomize(neuralnet *NN)
         neuralnet_layer *Layer = &NN->Layers[n];
         for (int k = 0; k < Layer->OutputCount; k++)
         {
-            //Layer->Biases[k] = NN__GetRandomValue();
             Layer->Outputs[k] = NN__GetRandomValue();
-            for (int i = 0; i < Layer->InputCount; i++)
+            for (int i = 0; i < Layer->InputCountB; i++)
             {
-                Layer->Weights[k*Layer->InputCount + i] = NN__GetRandomValue();
+                Layer->Weights[k*Layer->InputCountB + i] = NN__GetRandomValue();
             }
         }
         /* NOTE: for biases */
@@ -595,11 +604,16 @@ static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
 #endif
 
 
-static void NN__MatScaleInPlace(float *Mat, float Scale, int Row, int Col)
+static void NN__MatScaleInPlace(float *Mat, float Scale, int Stride, int Row, int Col)
 {
-    for (int i = 0; i < Row*Col; i++)
+    for (int y = 0; y < Col; y++)
     {
-        Mat[i] *= Scale;
+        /* compiler was able to vectorize the code with -O3 */
+        for (int x = 0; x < Row; x++)
+        {
+            int Index = y*Stride + x;
+            Mat[Index] *= Scale;
+        }
     }
 }
 

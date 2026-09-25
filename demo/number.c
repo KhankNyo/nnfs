@@ -216,9 +216,11 @@ static void PrintVerdict(neuralnet *NN, const verdict_config *Config)
     /* param stats */
     {
         neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
-        printf("wmin: %f, wmax: %f\n", 
+        printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f\n", 
             Stats.WeightMin,
-            Stats.WeightMax
+            Stats.WeightMax,
+            Stats.BiasMin,
+            Stats.BiasMax
         );
     }
 
@@ -296,7 +298,7 @@ int main(int ArgumentCount, char **Arguments)
     float FalseNegativeThreshold = 0.3;
     float LearningRate = 0.5;
     float L2Lambda = 0.7;
-#if 1
+#if 0
 #define MODEL_LAYER_COUNT 2
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
         [0] = 64,
