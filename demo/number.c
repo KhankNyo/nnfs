@@ -319,6 +319,7 @@ int main(int ArgumentCount, char **Arguments)
     data TestingData = { 0 };
     float *TrainingLoss = NULL;
     float *TestingLoss = NULL;
+    predict_flags InputFlags = PREDICT_FLAG_RGBA_IMAGE;
     {
         printf("Loading training data...\n");
         TrainingData = LoadTrainingCSV(TrainingFileName, TrainingSampleCount, IMAGE_WIDTH, IMAGE_HEIGHT);
@@ -364,7 +365,8 @@ int main(int ArgumentCount, char **Arguments)
                     "    y[f] - Set L2 regularization lambda\n"
                     "             ex: 'y0.1'\n"
                     "    L    - Display learning rate\n"
-                    "    Y    - Display L2 regularization lambda\n",
+                    "    Y    - Display L2 regularization lambda\n"
+                    "    I    - Toggle backpropagation for input prediction\n",
                     InputFileName,
                     TrainingFileName,
                     TestingFileName,
@@ -396,6 +398,19 @@ int main(int ArgumentCount, char **Arguments)
             case 'y':
             {
                 InputValue("L2 lambda", &L2Lambda);
+            } break;
+            case 'I':
+            {
+                if (InputFlags & PREDICT_FLAG_ENABLE_BACKPROP)
+                {
+                    InputFlags &= ~PREDICT_FLAG_ENABLE_BACKPROP;
+                    printf("Disabled backprop for input images.\n");
+                }
+                else
+                {
+                    InputFlags |= PREDICT_FLAG_ENABLE_BACKPROP;
+                    printf("Enabled backprop for input images.\n");
+                }
             } break;
 
             case 'T': /* train all (training dataset) */
@@ -526,7 +541,7 @@ int main(int ArgumentCount, char **Arguments)
 
                     float Loss = 0;
                     bool IsCorrect = Predict(&NN, &(predict_params) {
-                        .Flags = PREDICT_FLAG_RGBA_IMAGE | PREDICT_FLAG_ENABLE_BACKPROP,
+                        .Flags = InputFlags,
 
                         .LearningRate = LearningRate, 
                         .Image = Data, 
