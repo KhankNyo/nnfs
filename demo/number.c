@@ -128,6 +128,55 @@ static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidt
     return Data;
 }
 
+/* NOTE: rgba image */
+static void CenterImage(uint8_t *Dst, const uint8_t *Src, int Width, int Height)
+{
+    int ChannelCount = IMAGE_CHANNEL_COUNT;
+    int OffsetX = 0;
+    int OffsetY = 0;
+    {
+        int CenterX = 0;
+        int CenterY = 0;
+        int Intensity = 0;
+        for (int y = 0; y < Height; y++)
+        {
+            int Col = y*Width;
+            for (int x = 0; x < Width; x++)
+            {
+                int Index = (Col + x)*ChannelCount;
+                CenterX += x * Src[Index];
+                CenterY += y * Src[Index];
+                Intensity += Src[Index];
+            }
+        }
+
+        CenterX = (float)CenterX / Intensity + 0.5;
+        CenterY = (float)CenterY / Intensity + 0.5;
+        OffsetX = CenterX - Width/2;
+        OffsetY = CenterY - Height/2;
+    }
+
+    for (int y = 0; y < Height; y++)
+    {
+        int SrcY = y + OffsetY;
+        if (SrcY >= Height)
+            SrcY -= Height;
+        if (SrcY < 0)
+            SrcY += Height;
+        for (int x = 0; x < Width; x++)
+        {
+            int SrcX = x + OffsetX;
+            if (SrcX >= Width)
+                SrcX -= Width;
+            if (SrcX < 0)
+                SrcX += Width;
+            int SrcIndex = (SrcY*Width + SrcX)*IMAGE_CHANNEL_COUNT;
+            int DstIndex = (y*Width + x)*IMAGE_CHANNEL_COUNT;
+            memcpy(Dst + DstIndex, Src + SrcIndex, ChannelCount);
+        }
+    }
+}
+
 static int FindMaxIndex(const float *Data, int Count)
 {
     ASSERTF(Count, "Invalid count: %d\n", Count);
@@ -319,6 +368,7 @@ int main(int ArgumentCount, char **Arguments)
     data TestingData = { 0 };
     float *TrainingLoss = NULL;
     float *TestingLoss = NULL;
+    uint8_t *CenteredImage = NULL;
     predict_flags InputFlags = PREDICT_FLAG_RGBA_IMAGE;
     {
         printf("Loading training data...\n");
@@ -330,6 +380,7 @@ int main(int ArgumentCount, char **Arguments)
 
         TrainingLoss = AllocateMemory(TrainingSampleCount * sizeof(TrainingLoss[0]));
         TestingLoss = AllocateMemory(TestingSampleCount * sizeof(TestingLoss[0]));
+        CenteredImage = AllocateMemory(IMAGE_PIXEL_COUNT*IMAGE_CHANNEL_COUNT);
 
         neuralnet NN = NeuralNet_Create(&(neuralnet_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
@@ -539,12 +590,14 @@ int main(int ArgumentCount, char **Arguments)
                         Data = NewData;
                     }
 
+                    CenterImage(CenteredImage, Data, Width, Height);
+
                     float Loss = 0;
                     bool IsCorrect = Predict(&NN, &(predict_params) {
                         .Flags = InputFlags,
 
                         .LearningRate = LearningRate, 
-                        .Image = Data, 
+                        .Image = CenteredImage, 
                         .Label = Digit,
                         .L2Lambda = L2Lambda / TrainingSampleCount,
 
@@ -561,7 +614,7 @@ int main(int ArgumentCount, char **Arguments)
                     });
 
                     /* write out training image (diff name) since it could've been resized */
-                    stbi_write_bmp(RandomPredictionFileName, Width, Height, Channels, Data);
+                    stbi_write_bmp(RandomPredictionFileName, Width, Height, Channels, CenteredImage);
                     free(Data);
                 }
                 else
@@ -574,6 +627,7 @@ int main(int ArgumentCount, char **Arguments)
 Out:
         NeuralNet_Destroy(&NN);
     }
+    free(CenteredImage);
     free(TrainingData.Arena);
     free(TestingData.Arena);
     free(TrainingLoss);
