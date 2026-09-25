@@ -392,26 +392,30 @@ float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int Output
          * without having to write any simd intrinsics (runtime halved) */
         {
             neuralnet_layer *Layer = NN->Layers + i;
-            int WeightCount = Layer->OutputCount * Layer->InputCountB;
-            float *WeightPtr = Layer->Weights;
+            //int WeightCount = Layer->OutputCount * Layer->InputCountB;
+            //float *WeightPtr = Layer->Weights;
 
-            float Weights[NN__SIMD_VEC_LEN] = { 0 };
-            for (int k = 0; k < WeightCount / NN__SIMD_VEC_LEN; k++)
+            for (int h = 0; h < Layer->OutputCount; h++)
             {
-                for (int j = 0; j < NN__SIMD_VEC_LEN; j++)
+                float *WeightPtr = Layer->Weights + h*Layer->InputCountB;
+                float Weights[NN__SIMD_VEC_LEN] = { 0 };
+                for (int k = 0; k < Layer->InputCount / NN__SIMD_VEC_LEN; k++)
+                {
+                    for (int j = 0; j < NN__SIMD_VEC_LEN; j++)
+                    {
+                        float Weight = *WeightPtr++;
+                        Weights[j] += Weight*Weight;
+                    }
+                }
+                for (int k = 0; k < NN__SIMD_VEC_LEN; k++)
+                {
+                    Sum += Weights[k];
+                }
+                for (int k = 0; k < Layer->InputCount % NN__SIMD_VEC_LEN; k++)
                 {
                     float Weight = *WeightPtr++;
-                    Weights[j] += Weight*Weight;
+                    Sum += Weight*Weight;
                 }
-            }
-            for (int k = 0; k < NN__SIMD_VEC_LEN; k++)
-            {
-                Sum += Weights[k];
-            }
-            for (int k = 0; k < WeightCount % NN__SIMD_VEC_LEN; k++)
-            {
-                float Weight = *WeightPtr++;
-                Sum += Weight*Weight;
             }
         }
         L2 += Sum;
