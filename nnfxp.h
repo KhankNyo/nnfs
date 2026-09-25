@@ -10,10 +10,11 @@
 #  define NNFXP_TYPE_MAX INT8_MAX
 #  define NNFXP_TYPE_MIN INT8_MIN
 #  define nnfxp_type int8_t
+#  define nnfxp_utype uint8_t
 #endif /* nnfxp_type */
 
 #ifndef NNFXP_FRACTION_BITS
-#  define NNFXP_FRACTION_BITS 5
+#  define NNFXP_FRACTION_BITS 4
 #endif /* NNFXP_FRACTION_BITS */
 
 
@@ -31,6 +32,7 @@ typedef enum
     NNFXP_FREE,
 } nnfxp_allocator_mode;
 typedef void *(*nnfxp_allocator_callback)(void *UserData, nnfxp_allocator_param *Param);
+typedef nnfxp_type (*nnfxp_activation_callback)(void *UserData, nnfxp_type X);
 typedef nnfxp_type (*nnfxp_rand_callback)(void *UserData);
 
 struct nnfxp_allocator_param
@@ -54,9 +56,10 @@ struct nnfxp_config
 
     void *AllocatorData;
     nnfxp_allocator_callback AllocatorCallback;
-
     void *RandData;
     nnfxp_rand_callback RandCallback;
+    void *ActivationData;
+    nnfxp_activation_callback ActivationCallback;
 };
 
 struct nnfxp_feedforward_config
@@ -113,6 +116,8 @@ struct nnfxp
     nnfxp_allocator_callback AllocatorCallback;
     void *RandData;
     nnfxp_rand_callback RandCallback;
+    void *ActivationData;
+    nnfxp_activation_callback ActivationCallback;
 };
 
 
@@ -122,7 +127,8 @@ struct nnfxp
 #if defined(NNFXP_IMPLEMENTATION) && !defined(NNFXP_ALREADY_IMPLEMENTED)
 #define NNFXP_ALREADY_IMPLEMENTED
 
-#include <stdlib.h>
+#include <stdlib.h> /* malloc/free */
+#include <string.h> /* memcpy */
 #include <assert.h>
 
 
@@ -143,24 +149,25 @@ struct nnfxp
         }\
     )
 #define NNFXP__RAND(p_nn) (p_nn)->RandCallback((p_nn)->RandData)
+#define NNFXP__IN_RANGE(lower, n, upper) ((lower) <= (n) && (n) <= (upper))
 
 #define NNFXP__SIMD_VEC_LEN 8
 #define NNFXP__MAX(a, b) ((a) > (b)? (a) : (b))
 #define NNFXP__MIN(a, b) ((a) < (b)? (a) : (b))
 
-#define NNFXP__FLT_EXTRACT_FRAC(val) ((val) - (double)(nnfxp_type)(val))
+#define NNFXP__FLT_EXTRACT_FRAC(val) ((val) - (double)(nnfxp_utype)(val))
 
-#define NNFXP__ONE ((nnfxp_type)1 << NNFXP_FRACTION_BITS)
+#define NNFXP__ONE ((nnfxp_utype)1 << NNFXP_FRACTION_BITS)
 #define NNFXP__EXTRACT_FRAC(fxp) ((fxp) & (NNFXP__ONE - 1))
 #define NNFXP__EXTRACT_INT(fxp) ((fxp) >> NNFXP_FRACTION_BITS)
 
 #define NNFXP(constant) (\
-        ((nnfxp_type)(constant) << NNFXP_FRACTION_BITS) \
-        + NNFXP__FLT_EXTRACT_FRAC(constant) * (double)NNFXP__ONE\
+        ((nnfxp_utype)(constant) << NNFXP_FRACTION_BITS) \
+        + (nnfxp_utype)(NNFXP__FLT_EXTRACT_FRAC(constant) * (double)NNFXP__ONE)\
     )
 
 #define NNFXP__FLT(fxp) (\
-        (double)((fxp) >> NNFXP_FRACTION_BITS) + (double)NNFXP__EXTRACT_FRAC(fxp) / NNFXP__ONE \
+        (double)((fxp) >> NNFXP_FRACTION_BITS)casiopea best of session + (double)NNFXP__EXTRACT_FRAC(fxp) / NNFXP__ONE \
     )
 
 #define NNFXP__ADD(a, b) ((a) + (b))
@@ -196,9 +203,81 @@ static void *Nnfxp__DefaultAllocatorCallback(void *Data, nnfxp_allocator_param *
 static nnfxp_type Nnfxp__DefaultRandCallback(void *Data)
 {
     (void)Data;
-    return rand();
+    float Result = (float)rand() / RAND_MAX * 2.0 - 1;
+    return NNFXP(Result);
 }
 
+static nnfxp_type Nnfxp__Sigmoid(void *Data, nnfxp_type X)
+{
+    (void)Data;
+    /* piecewise approx of 1/(1 + e^-x) */
+    if (NNFXP__IN_RANGE(NNFXP(-1.0), X, NNFXP(1.0)))
+    {
+        return NNFXP(0.5) + NNFXP__MUL(NNFXP(0.235), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(-1.5), X, NNFXP(-1.0)))
+    {
+        return NNFXP(0.445) + NNFXP__MUL(NNFXP(0.175), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(1.0), X, NNFXP(1.5)))
+    {
+        return NNFXP(0.555) + NNFXP__MUL(NNFXP(0.175), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(-2.0), X, NNFXP(-1.5)))
+    {
+        return NNFXP(0.3708) + NNFXP__MUL(NNFXP(0.126), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(1.5), X, NNFXP(2.0)))
+    {
+        return NNFXP(0.6308) + NNFXP__MUL(NNFXP(0.126), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(-3.0), X, NNFXP(-2.0)))
+    {
+        return NNFXP(0.26) + NNFXP__MUL(NNFXP(0.07178), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(2.0), X, NNFXP(3.0)))
+    {
+        return NNFXP(0.74) + NNFXP__MUL(NNFXP(0.07178), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(-5.0), X, NNFXP(-3.0)))
+    {
+        return NNFXP(0.105) + NNFXP__MUL(NNFXP(0.0203665), X);
+    }
+    else if (NNFXP__IN_RANGE(NNFXP(3.0), X, NNFXP(5.0)))
+    {
+        return NNFXP(0.895) + NNFXP__MUL(NNFXP(0.0203665), X);
+    }
+    else if (X > NNFXP(5))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static nnfxp_type Nnfxp__DotProduct(const nnfxp_type *A, const nnfxp_type *B, int Length)
+{
+    nnfxp_type Result = 0;
+    for (int i = 0; i < Length; i++)
+    {
+        Result += NNFXP__MUL(A[i], B[i]);
+    }
+    return Result;
+}
+
+/* NOTE: Out = A*B^T */
+static void Nnfxp__MatMulABT(nnfxp_type *Out, const nnfxp_type *A, const nnfxp_type *BT, int RowA, int ColA, int RowBT)
+{
+    for (int Ca = 0; Ca < ColA; Ca++)
+    {
+        for (int Rbt = 0; Rbt < RowBT; Rbt++)
+        {
+            const nnfxp_type *RowMatA = A + Ca*RowBT;
+            const nnfxp_type *ColMatB = BT + Rbt*RowA;
+            nnfxp_type Dp = Nnfxp__DotProduct(RowMatA, ColMatB, RowA);
+            Out[Ca*RowBT + Rbt] = Dp;
+        }
+    }
+}
 
 
 
@@ -229,6 +308,16 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
     {
         NN->RandCallback = Nnfxp__DefaultRandCallback;
         NN->RandData = NULL;
+    }
+    if (Config->ActivationCallback != NULL)
+    {
+        NN->ActivationCallback = Config->ActivationCallback;
+        NN->ActivationData = Config->ActivationData;
+    }
+    else
+    {
+        NN->ActivationCallback = Nnfxp__Sigmoid;
+        NN->ActivationData = NULL;
     }
 
     /* allocate needed mem */
@@ -293,15 +382,31 @@ void Nnfxp_Randomize(nnfxp *NN)
 
 void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config)
 {
+    assert(Config->Inputs && Config->InputCount == NN->InputCount);
+    memcpy(NN->Inputs, Config->Inputs, Config->InputCount*sizeof(NN->Inputs[0]));
+    nnfxp_activation_callback ActivationFn = NN->ActivationCallback;
+    assert(ActivationFn);
+
+    const nnfxp_type *X = NN->Inputs;
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        nnfxp_layer *Layer = NN->Layers + i;
+        Nnfxp__MatMulABT(
+            Layer->Outputs, Layer->Weights, X,
+            Layer->OutputCount, Layer->InputCountB, 1
+        );
+
+        for (int k = 0; k < Layer->OutputCount; k++)
+        {
+            Layer->Outputs[k] = ActivationFn(NN->ActivationData, Layer->Outputs[k]);
+        }
+
+        X = Layer->Outputs;
+    }
 }
 
 void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
 {
 }
-
-
-#if !defined(NNFXP_USE_SIMD)
-#else
-#endif
 
 #endif
