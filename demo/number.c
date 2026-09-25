@@ -24,7 +24,6 @@
 #define IMAGE_PIXEL_COUNT (IMAGE_WIDTH*IMAGE_HEIGHT)
 #define DIGIT_COUNT 10
 #define KB 1024
-#define MODEL_LAYER_COUNT 2
 #define ASSERTF(x, ...) do {\
     if (!(x)) {\
         printf("Assertion failed on line %d in %s:\n", __LINE__, __FILE__);\
@@ -55,6 +54,7 @@ typedef struct
     predict_flags Flags;
 
     float LearningRate;
+    float L2Lambda;
     const uint8_t *Image;
     int Label;
 
@@ -88,6 +88,8 @@ static void *AllocateMemory(size_t ByteCount)
 static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidth, int ImageHeight)
 {
     data Data = { 0 };
+    int _;
+    (void)_;
 
     /* terrible code for loading the training data but idgaf */
     FILE *TrainingFile = fopen(FileName, "rb");
@@ -103,7 +105,7 @@ static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidt
         while (!feof(TrainingFile) && Data.Count < SampleCount)
         {
             int Label = 0;
-            fscanf(TrainingFile, "%d,", &Label);
+            _ = fscanf(TrainingFile, "%d,", &Label);
             Data.Labels[Data.Count] = Label;
 
             for (int y = 0; y < IMAGE_HEIGHT; y++)
@@ -111,13 +113,13 @@ static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidt
                 for (int x = 0; x < IMAGE_WIDTH; x++)
                 {
                     int Pixel = 0;
-                    fscanf(TrainingFile, "%d,", &Pixel);
+                    _ = fscanf(TrainingFile, "%d,", &Pixel);
                     uint8_t PixelByte = Pixel;
                     memcpy(Ptr, &PixelByte, TRAINING_IMAGE_CHANNEL_COUNT);
                     Ptr += TRAINING_IMAGE_CHANNEL_COUNT;
                 }
             }
-            fscanf(TrainingFile, "\n");
+            _ = fscanf(TrainingFile, "\n");
 
             Data.Count++;
         }
@@ -169,11 +171,12 @@ static bool Predict(neuralnet *NN, predict_params *Params)
             .ExpectedOutputCount = DIGIT_COUNT,
             .ExpectedOutputs = g_FpNNExpectedOutputs,
             .LearningRate = Params->LearningRate,
+            .L2Lambda = Params->L2Lambda,
         });
     }
     if (Params->OutLoss)
     {
-        *Params->OutLoss = NeuralNet_CalcLoss(NN, g_FpNNExpectedOutputs, DIGIT_COUNT);
+        *Params->OutLoss = NeuralNet_CalcLoss(NN, g_FpNNExpectedOutputs, DIGIT_COUNT, Params->L2Lambda);
     }
 
     const float *Outputs = NeuralNet_GetOutput(NN);
@@ -267,9 +270,19 @@ static void WriteTestSampleToFile(const char *FileName, const uint8_t *Data)
     free(Image);
 }
 
+static void InputValue(const char *What, float *Value)
+{
+    float Input = 0;
+    int _ = fscanf(stdin, "%f", &Input);
+    (void)_;
+    printf("%s changed from %f to %f\n", What, *Value, Input);
+    *Value = Input;
+}
+
 
 int main(int ArgumentCount, char **Arguments)
 {
+    (void)ArgumentCount, (void)Arguments;
     srand(time(NULL)); /* uncomment for random weight and bias initialization values */
 
     /* https://github.com/phoebetronic/mnist/tree/main */
@@ -281,12 +294,22 @@ int main(int ArgumentCount, char **Arguments)
     /* config */
     float TruePositiveThreshold = 0.7;
     float FalseNegativeThreshold = 0.3;
-    float LearningRate = 0.1;
-    /* https://www.geeksforgeeks.org/machine-learning/handwritten-digit-recognition-using-neural-network/ */
+    float LearningRate = 0.5;
+    float L2Lambda = 0.7;
+#if 1
+#define MODEL_LAYER_COUNT 2
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
-        [0] = 32,
+        [0] = 64,
         [1] = DIGIT_COUNT, /* output layer */
     };
+#else
+#define MODEL_LAYER_COUNT 3
+    int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
+        [0] = 128,
+        [1] = 64,
+        [2] = DIGIT_COUNT, /* output layer */
+    };
+#endif
 
     int TrainingSampleCount = 60000; /* mnist_train.csv contains 60k training samples */
     int TestingSampleCount = 10000;
@@ -310,6 +333,7 @@ int main(int ArgumentCount, char **Arguments)
             .LayerCount = MODEL_LAYER_COUNT,
             .NodeCountPerLayer = ModelArchitectureBuzzword,
         });
+        printf("try 'h' for help\n");
         while (1)
         {
             printf("\n> ");
@@ -317,6 +341,8 @@ int main(int ArgumentCount, char **Arguments)
 
             switch (Input)
             {
+            case '\n': 
+                break;
             default:
             {
                 printf("uwotm8, try 'h' for help\n");
@@ -324,21 +350,51 @@ int main(int ArgumentCount, char **Arguments)
             case 'h':
             {
                 printf(
-                    "q    - quit\n"
-                    "i[n] - predict from given image with the name '%s[n].png',\n"
-                    "         ex: 'input0.png' for image with number 0, command: 'i0'.\n"
-                    "T    - train all from training sample '%s'\n"
-                    "p    - predict a random sample from test suite '%s'\n"
-                    "P    - predict all from test suite '%s'\n",
+                    "    q    - quit\n"
+                    "    i[n] - predict from given image with the name '%s[n].png',\n"
+                    "             ex: 'input0.png' for image with number 0, command: 'i0'.\n"
+                    "    T    - train all from training sample '%s'\n"
+                    "    p    - predict a random sample from test suite '%s'\n"
+                    "    P    - predict all from test suite '%s'\n"
+                    "    r    - Reset all weights\n"
+                    "    l[f] - Set learning rate\n"
+                    "             ex: 'l0.1'\n"
+                    "    y[f] - Set L2 regularization lambda\n"
+                    "             ex: 'y0.1'\n"
+                    "    L    - Display learning rate\n"
+                    "    Y    - Display L2 regularization lambda\n",
                     InputFileName,
                     TrainingFileName,
-                    TestingFileName, 
+                    TestingFileName,
                     TestingFileName
                 );
             } break;
 
             case 'q':
                 goto Out;
+
+            case 'r':
+            {
+                NeuralNet_Randomize(&NN);
+                printf("Neural network randomized.\n");
+            } break;
+
+            case 'L':
+            {
+                printf("Learning rate: %f\n", LearningRate);
+            } break;
+            case 'Y':
+            {
+                printf("L2 lambda: %f\n", L2Lambda);
+            } break;
+            case 'l':
+            {
+                InputValue("Learning rate", &LearningRate);
+            } break;
+            case 'y':
+            {
+                InputValue("L2 lambda", &L2Lambda);
+            } break;
 
             case 'T': /* train all (training dataset) */
             {
@@ -349,14 +405,15 @@ int main(int ArgumentCount, char **Arguments)
                     {
                         const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
                         int Digit = TrainingData.Labels[i];
-                        printf("\rTraining in progress: %d/%d, precision: %4.2f%%", 
-                            i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100
+                        printf("\rTraining in progress: %d/%d, precision: %4.2f%% (%d/%d)", 
+                            i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100, TruePositiveCount, TrainingSampleCount
                         );
                         bool Correct = Predict(&NN, &(predict_params) {
                             .Flags = PREDICT_FLAG_ENABLE_BACKPROP,
                             .LearningRate = LearningRate, 
                             .Image = Sample,
                             .Label = Digit, 
+                            .L2Lambda = L2Lambda / TrainingSampleCount,
 
                             .OutLoss = &TrainingLoss[i],
                         });
@@ -390,6 +447,7 @@ int main(int ArgumentCount, char **Arguments)
                     .LearningRate = LearningRate, 
                     .Image = Sample, 
                     .Label = Digit,
+                    .L2Lambda = L2Lambda / TestingSampleCount,
 
                     .OutLoss = &Loss,
                 });
@@ -416,6 +474,7 @@ int main(int ArgumentCount, char **Arguments)
                         .LearningRate = LearningRate, 
                         .Image = Sample, 
                         .Label = Digit,
+                        .L2Lambda = L2Lambda / TestingSampleCount,
 
                         .OutLoss = &TestingLoss[i],
                     });
@@ -470,6 +529,7 @@ int main(int ArgumentCount, char **Arguments)
                         .LearningRate = LearningRate, 
                         .Image = Data, 
                         .Label = Digit,
+                        .L2Lambda = L2Lambda / TrainingSampleCount,
 
                         .OutLoss = &Loss,
                     });

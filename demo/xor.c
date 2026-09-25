@@ -32,7 +32,7 @@ static void DisplayStats(neuralnet *NN, bool IsTraining)
 {
     printf("\nIsTraining:       %s\n", IsTraining? "true" : "false");
     printf("Learning rate:    %f\n", s_LearningRate);
-    printf("Loss: %f\n", NeuralNet_CalcLoss(NN, s_ExpectedOutput, 1));
+    printf("Loss: %f\n", NeuralNet_CalcLoss(NN, s_ExpectedOutput, 1, 0));
     printf("Current dataset:\n");
     printf("    [%g %g | %g]\n", 
         s_InputTrainingData[s_CurrentDataset][0], 
