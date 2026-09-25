@@ -392,9 +392,6 @@ float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int Output
          * without having to write any simd intrinsics (runtime halved) */
         {
             neuralnet_layer *Layer = NN->Layers + i;
-            //int WeightCount = Layer->OutputCount * Layer->InputCountB;
-            //float *WeightPtr = Layer->Weights;
-
             for (int h = 0; h < Layer->OutputCount; h++)
             {
                 float *WeightPtr = Layer->Weights + h*Layer->InputCountB;
