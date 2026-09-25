@@ -31,8 +31,10 @@ struct neuralnet_config
     neuralnet_allocator_callback AllocatorCallback;
 };
 
+
 struct neuralnet_backprop_config
 {
+    float L2Lambda;
     float LearningRate;
     int ExpectedOutputCount;
     const float *ExpectedOutputs;
@@ -72,9 +74,9 @@ void NeuralNet_Destroy(neuralnet *NN);
 
 void NeuralNet_Randomize(neuralnet *NN);
 void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config);
-void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config);
+void NeuralNet_Backprop(neuralnet *NN, neuralnet_backprop_config *Config);
 neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN);
-float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount);
+float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount, float L2Lambda);
 
 void NeuralNet_Print(const neuralnet *NN);
 float *NeuralNet_GetOutput(neuralnet *NN);
@@ -99,7 +101,7 @@ struct neuralnet_layer
     int InputCountB;
     int InputCount;
     int OutputCount;
-    /* [Input x Output matrix] */
+    /* [InputB x Output matrix] */
     float *Weights;
 
     /* [array with length of OutputCount] */
@@ -143,6 +145,7 @@ struct neuralnet_layer
         }\
     )
 
+#define NN__SIMD_VEC_LEN 8
 #define NN__ALLOCATION_SCOPE_BEGIN(p_nn) 0
 #define NN__ALLOCATION_SCOPE_END(p_nn) 0
 #define NN__ALLOCATION_SCOPE(p_nn) for (\
@@ -154,11 +157,11 @@ struct neuralnet_layer
 #define NN__MIN(a, b) ((a) < (b)? (a) : (b))
 
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param);
-static void NN__LinearCombination(float *Y, const float *M, const float *X, const float *B, int Row, int Col);
 static float NN__DotProduct(const float *A, const float *B, int Length);
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT);
 static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col);
 static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col);
+static void NN__MatScaleInPlace(float *Mat, float Scale, int Row, int Col);
 static float NN__GetRandomValue(void);
 static float NN__Sigmoid(float Value);
 static float NN__SigmoidDerivativeY(float Y);
@@ -291,7 +294,7 @@ void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Co
     }
 }
 
-void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config)
+void NeuralNet_Backprop(neuralnet *NN, neuralnet_backprop_config *Config)
 {
     /* deltas */
     {
@@ -326,6 +329,8 @@ void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config)
         }
     }
 
+    float L2Regularization = 1.0 - Config->L2Lambda;
+
     /* update weights and biases */
     int InputCountB = NN->InputCountB;
     float *Inputs = NN->Inputs;
@@ -333,6 +338,7 @@ void NeuralNet_Backprop(neuralnet *NN, const neuralnet_backprop_config *Config)
     {
         neuralnet_layer *Curr = NN->Layers + i;
         NN__MatMulABT(NN->ScratchMatrix, Curr->Deltas, Inputs, 1, Curr->OutputCount, InputCountB);
+        NN__MatScaleInPlace(Curr->Weights, L2Regularization, InputCountB, Curr->OutputCount);
         NN__MatSubInPlace(Curr->Weights, NN->ScratchMatrix, InputCountB, Curr->OutputCount);
 
         Inputs = Curr->Outputs;
@@ -362,8 +368,9 @@ neuralnet_param_stats NeuralNet_GetParamStats(const neuralnet *NN)
     return Stats;
 }
 
-/* MSE */
-float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount)
+
+/* MSE + L2 regularization */
+float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int OutputCount, float L2Lambda)
 {
     float Sum = 0;
     const float *Outputs = NeuralNet_GetOutput(NN);
@@ -372,7 +379,41 @@ float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int Output
         float Tmp = (ExpectedOutputs[i] - Outputs[i]);
         Sum += Tmp*Tmp;
     }
-    return Sum / OutputCount;
+
+    float L2 = 0;
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        float Sum = 0;
+        /* NOTE: convoluted code to add the squares of weights,
+         * but doing it this way helped the compiler vectorize the code
+         * without having to write any simd intrinsics (runtime halved) */
+        {
+            neuralnet_layer *Layer = NN->Layers + i;
+            int WeightCount = Layer->OutputCount * Layer->InputCountB;
+            float *WeightPtr = Layer->Weights;
+
+            float Weights[NN__SIMD_VEC_LEN] = { 0 };
+            for (int k = 0; k < WeightCount / NN__SIMD_VEC_LEN; k++)
+            {
+                for (int j = 0; j < NN__SIMD_VEC_LEN; j++)
+                {
+                    float Weight = *WeightPtr++;
+                    Weights[j] += Weight*Weight;
+                }
+            }
+            for (int k = 0; k < NN__SIMD_VEC_LEN; k++)
+            {
+                Sum += Weights[k];
+            }
+            for (int k = 0; k < WeightCount % NN__SIMD_VEC_LEN; k++)
+            {
+                float Weight = *WeightPtr++;
+                Sum += Weight*Weight;
+            }
+        }
+        L2 += Sum;
+    }
+    return 0.5 * Sum + 0.5 * L2 * L2Lambda;
 }
 
 
@@ -461,7 +502,6 @@ static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param 
 #if defined(NEURALNET_USE_SIMD)
 
 #include <x86intrin.h>
-#define NN__SIMD_VEC_LEN 8
 
 static float NN__DotProduct(const float *A, const float *B, int Length)
 {
@@ -554,6 +594,14 @@ static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col)
 }
 #endif
 
+
+static void NN__MatScaleInPlace(float *Mat, float Scale, int Row, int Col)
+{
+    for (int i = 0; i < Row*Col; i++)
+    {
+        Mat[i] *= Scale;
+    }
+}
 
 /* NOTE: Y = A . B^T */
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT)
