@@ -8,14 +8,13 @@
 #include <stdint.h>
 
 #ifndef nnfxp_type
-#  define NNFXP_TYPE_MAX INT32_MAX
-#  define NNFXP_TYPE_MIN INT32_MIN
+#  define nnfxp_xtype int64_t
 #  define nnfxp_type int32_t
 #  define nnfxp_utype uint32_t
 #endif /* nnfxp_type */
 
 #ifndef NNFXP_FRACTION_BITS
-#  define NNFXP_FRACTION_BITS 13
+#  define NNFXP_FRACTION_BITS 20
 #endif /* NNFXP_FRACTION_BITS */
 
 
@@ -33,6 +32,11 @@ typedef enum
     NNFXP_ALLOCATE,
     NNFXP_FREE,
 } nnfxp_allocator_mode;
+typedef enum
+{
+    NNFXP_CONFIG_NONE = 0,
+    NNFXP_CONFIG_FEEDFORWARD_ONLY = 1 << 0,
+} nnfxp_config_flags;
 typedef void *(*nnfxp_allocator_callback)(void *UserData, nnfxp_allocator_param *Param);
 typedef nnfxp_type (*nnfxp_activation_callback)(void *UserData, nnfxp_type X);
 typedef nnfxp_type (*nnfxp_rand_callback)(void *UserData);
@@ -58,6 +62,7 @@ struct nnfxp_param_stats
 
 struct nnfxp_config
 {
+    nnfxp_config_flags Flags;
     int InputCount;
     int LayerCount;
     int *NodeCountPerLayer;
@@ -99,6 +104,8 @@ nnfxp_type *Nnfxp_GetOutputs(nnfxp *NN);
 void Nnfxp_Print(nnfxp *NN);
 
 
+#define NNFXP_TYPE_MAX (nnfxp_type)((1llu << (sizeof(nnfxp_type)*8)) - 1)
+#define NNFXP_TYPE_MIN (nnfxp_type)(1llu << (sizeof(nnfxp_type)*8))
 #define NNFXP_FLT_EXTRACT_FRAC(val) ((val) - (float)(nnfxp_utype)(val))
 
 #define NNFXP_EXTRACT_FRAC(fxp) ((fxp) & (NNFXP_ONE - 1))
@@ -115,7 +122,7 @@ void Nnfxp_Print(nnfxp *NN);
 #define NNFXP_ADDC(x, constant) NNFXP_ADD(x, NNFXP(constant)) 
 #define NNFXP_SUBC(x, constant) NNFXP_SUB(x, NNFXP(constant))
 
-#define NNFXP_MUL(a, b) (((a) * (b)) >> (NNFXP_FRACTION_BITS))
+#define NNFXP_MUL(a, b) (((nnfxp_xtype)(a) * (b)) >> (NNFXP_FRACTION_BITS))
 #define NNFXP_DIV(a, b) (((a) / (b)) << NNFXP_FRACTION_BITS)
 #define NNFXP_DIVL(a, b) ((((a) << NNFXP_FRACTION_BITS) / (b)))
 #define NNFXP_DIVR(a, b) (((a) / ((b) >> NNFXP_FRACTION_BITS)))
@@ -267,12 +274,13 @@ static nnfxp_type Nnfxp__SigmoidDerivativeY(nnfxp_type Y)
 
 static nnfxp_type Nnfxp__DotProduct(const nnfxp_type *A, const nnfxp_type *B, int Length)
 {
-    nnfxp_type Result = 0;
+    nnfxp_xtype Result = 0;
     for (int i = 0; i < Length; i++)
     {
-        Result += NNFXP_MUL(A[i], B[i]);
+        // Result += NNFXP_MUL(A[i], B[i]);
+        Result += A[i] * B[i];
     }
-    return Result;
+    return Result >> NNFXP_FRACTION_BITS;
 }
 
 /* NOTE: Out = A*B^T */
@@ -380,7 +388,10 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
             int OutputCount = Config->NodeCountPerLayer[i];
 
             NN->Layers[i].Weights = NNFXP__ALLOC(NN, OutputCount*InputCountB*sizeof(NN->Layers[0].Weights[0]));
-            NN->Layers[i].Deltas = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Deltas[0]));
+            if (!(Config->Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
+            {
+                NN->Layers[i].Deltas = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Deltas[0]));
+            }
             NN->Layers[i].Outputs = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Outputs[0]));
             NN->Layers[i].InputCount = InputCount;
             NN->Layers[i].InputCountB = InputCountB;
@@ -390,7 +401,10 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
             InputCountB = OutputCount + 1;
             LargestSide = NNFXP__MAX(OutputCount + 1, LargestSide);
         }
-        NN->ScratchMatrix = NNFXP__ALLOC(NN, LargestSide*LargestSide*sizeof(NN->ScratchMatrix[0]));
+        if (!(Config->Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
+        {
+            NN->ScratchMatrix = NNFXP__ALLOC(NN, LargestSide*LargestSide*sizeof(NN->ScratchMatrix[0]));
+        }
     }
 
     Nnfxp_Randomize(NN);
@@ -462,6 +476,7 @@ void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
     /* deltas */
     {
         const nnfxp_layer *Last = NN->Layers + NN->LayerCount - 1;
+        assert(Last->Deltas && "Cannot backprop a read-only neural network");
         assert(Config->ExpectedOutputCount == Last->OutputCount);
 
         /* compute output layer deltas */
@@ -469,7 +484,8 @@ void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
         {
             nnfxp_type Error = Last->Outputs[i] - Config->ExpectedOutputs[i];
             /* NOTE: hack, learning rate should be present during weight/bias update, not during delta calculation */
-            Last->Deltas[i] = NNFXP_MUL(NNFXP_MUL(Config->LearningRate, Error), Nnfxp__SigmoidDerivativeY(Last->Outputs[i]));
+            nnfxp_xtype Tmp = Config->LearningRate * Error;
+            Last->Deltas[i] = (Tmp * Nnfxp__SigmoidDerivativeY(Last->Outputs[i])) >> NNFXP_FRACTION_BITS*2;
         }
 
         /* compute hidden layer deltas */
@@ -488,8 +504,8 @@ void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
             /* NOTE: Next->InputCountB includes node with value 1.0 for bias, Curr->OutputCount does not */
             for (int k = 0; k < Next->InputCountB; k++)
             {
-                nnfxp_type Tmp = NNFXP_MUL(Config->LearningRate, Nnfxp__SigmoidDerivativeY(Curr->Outputs[k]));
-                Curr->Deltas[k] = NNFXP_MUL(Curr->Deltas[k], Tmp);
+                nnfxp_xtype Tmp = Config->LearningRate * Nnfxp__SigmoidDerivativeY(Curr->Outputs[k]);
+                Curr->Deltas[k] = (Curr->Deltas[k] * Tmp) >> NNFXP_FRACTION_BITS*2;
             }
         }
     }

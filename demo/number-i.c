@@ -13,8 +13,17 @@
 #define IMAGE_IMPLEMENTATION
 #include "extern/image.h"
 
+#define NNFXP_FRACTION_BITS 8
+#define nnfxp_xtype int32_t
+#define nnfxp_type int16_t
+#define nnfxp_utype uint16_t
 #define NNFXP_IMPLEMENTATION
 #include "nnfxp.h"
+
+#define NEURALNET_IMPLEMENTATION
+#include "neuralnet.h"
+
+
 
 #define IMAGE_WIDTH 28
 #define IMAGE_HEIGHT 28
@@ -72,8 +81,10 @@ typedef struct
 } verdict_config;
 
 
-static nnfxp_type g_FpNNInputs[IMAGE_PIXEL_COUNT];
-static nnfxp_type g_FpNNExpectedOutputs[DIGIT_COUNT];
+static float g_FpNNInputs[IMAGE_PIXEL_COUNT];
+static float g_FpNNExpectedOutputs[DIGIT_COUNT];
+static nnfxp_type g_FxpNNInputs[IMAGE_PIXEL_COUNT];
+static nnfxp_type g_FxpNNExpectedOutputs[DIGIT_COUNT];
 
 
 static void *AllocateMemory(size_t ByteCount)
@@ -82,6 +93,25 @@ static void *AllocateMemory(size_t ByteCount)
     ASSERTF(Ptr, "Out of memory trying to allocate %fkb.", (float)ByteCount / KB);
     return Ptr;
 }
+
+static void CopyNeuralNetToNnfxp(nnfxp *Nnfxp, neuralnet *NN)
+{
+    assert(NN->LayerCount == Nnfxp->LayerCount);
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        neuralnet_layer *NNLayer = NN->Layers + i;
+        nnfxp_layer *NNFxpLayer = Nnfxp->Layers + i;
+        assert(NNLayer->InputCount == NNFxpLayer->InputCount);
+        assert(NNLayer->InputCountB == NNFxpLayer->InputCountB);
+        assert(NNLayer->OutputCount == NNFxpLayer->OutputCount);
+
+        for (int k = 0; k < NNLayer->OutputCount * NNLayer->InputCountB; k++)
+        {
+            NNFxpLayer->Weights[k] = NNFXP(NNLayer->Weights[k]);
+        }
+    }
+}
+
 
 
 static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidth, int ImageHeight)
@@ -188,13 +218,25 @@ static int FindMaxIndex(const nnfxp_type *Data, int Count)
     return MaxIndex;
 }
 
+static int FindMaxIndexFp32(const float *Data, int Count)
+{
+    ASSERTF(Count, "Invalid count: %d\n", Count);
+    int MaxIndex = 0;
+    for (int i = 1; i < Count; i++)
+    {
+        if (Data[i] > Data[MaxIndex])
+            MaxIndex = i;
+    }
+    return MaxIndex;
+}
+
 static bool Predict(nnfxp *NN, predict_params *Params)
 {
     if (Params->Flags & PREDICT_FLAG_RGBA_IMAGE)
     {
         for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
         {
-            g_FpNNInputs[i] = NNFXP(Params->Image[i*4] * (1.0 / 255.0));
+            g_FxpNNInputs[i] = NNFXP(Params->Image[i*4] * (1.0 / 255.0));
         }
     }
     else
@@ -202,22 +244,22 @@ static bool Predict(nnfxp *NN, predict_params *Params)
         /* straightforward for the compiler to do simd optimization, can't be bothered */
         for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
         {
-            g_FpNNInputs[i] = NNFXP(Params->Image[i] * (1.0 / 255.0)); /* normalizing color channel from 0..255 to 0..1 */
+            g_FxpNNInputs[i] = NNFXP(Params->Image[i] * (1.0 / 255.0)); /* normalizing color channel from 0..255 to 0..1 */
         }
     }
 
     Nnfxp_FeedForward(NN, &(nnfxp_feedforward_config) {
         .InputCount = IMAGE_PIXEL_COUNT,
-        .Inputs = g_FpNNInputs,
+        .Inputs = g_FxpNNInputs,
     });
 
-    memset(g_FpNNExpectedOutputs, 0, sizeof g_FpNNExpectedOutputs);
-    g_FpNNExpectedOutputs[Params->Label] = NNFXP(1.0);
+    memset(g_FxpNNExpectedOutputs, 0, sizeof g_FxpNNExpectedOutputs);
+    g_FxpNNExpectedOutputs[Params->Label] = NNFXP(1.0);
     if (Params->Flags & PREDICT_FLAG_ENABLE_BACKPROP)
     {
         Nnfxp_Backprop(NN, &(nnfxp_backprop_config) {
             .ExpectedOutputCount = DIGIT_COUNT,
-            .ExpectedOutputs = g_FpNNExpectedOutputs,
+            .ExpectedOutputs = g_FxpNNExpectedOutputs,
             .LearningRate = NNFXP(Params->LearningRate),
             .L2Lambda = NNFXP(Params->L2Lambda),
         });
@@ -225,7 +267,7 @@ static bool Predict(nnfxp *NN, predict_params *Params)
     if (Params->OutLoss)
     {
         *Params->OutLoss = NNFXP_FLT(Nnfxp_CalcLoss(NN, 
-            g_FpNNExpectedOutputs, 
+            g_FxpNNExpectedOutputs, 
             DIGIT_COUNT, 
             NNFXP(Params->L2Lambda)
         ));
@@ -245,7 +287,7 @@ static void PrintVerdict(nnfxp *NN, const verdict_config *Config)
         printf("Best guess: %d\n", FindMaxIndex(Output, DIGIT_COUNT));
         printf("Expected:    [");
         for (int i = 0; i < DIGIT_COUNT; i++)
-            printf("%4.3f ", NNFXP_FLT(g_FpNNExpectedOutputs[i]));
+            printf("%4.3f ", NNFXP_FLT(g_FxpNNExpectedOutputs[i]));
         printf("]\n");
 
         printf("Digits 0..9: [");
@@ -308,6 +350,128 @@ static void PrintVerdict(nnfxp *NN, const verdict_config *Config)
     }
     printf("----------------------------\n");
 }
+
+
+static bool PredictFp32(neuralnet *NN, predict_params *Params)
+{
+    if (Params->Flags & PREDICT_FLAG_RGBA_IMAGE)
+    {
+        for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
+        {
+            g_FpNNInputs[i] = Params->Image[i*4] * (1.0 / 255.0);
+        }
+    }
+    else
+    {
+        /* straightforward for the compiler to do simd optimization, can't be bothered */
+        for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
+        {
+            g_FpNNInputs[i] = Params->Image[i] * (1.0 / 255.0); /* normalizing color channel from 0..255 to 0..1 */
+        }
+    }
+
+    NeuralNet_FeedForward(NN, &(neuralnet_feedforward_config) {
+        .InputCount = IMAGE_PIXEL_COUNT,
+        .Inputs = g_FpNNInputs,
+    });
+
+    memset(g_FpNNExpectedOutputs, 0, sizeof g_FpNNExpectedOutputs);
+    g_FpNNExpectedOutputs[Params->Label] = 1.0;
+    if (Params->Flags & PREDICT_FLAG_ENABLE_BACKPROP)
+    {
+        NeuralNet_Backprop(NN, &(neuralnet_backprop_config) {
+            .ExpectedOutputCount = DIGIT_COUNT,
+            .ExpectedOutputs = g_FpNNExpectedOutputs,
+            .LearningRate = Params->LearningRate,
+            .L2Lambda = Params->L2Lambda,
+        });
+    }
+    if (Params->OutLoss)
+    {
+        *Params->OutLoss = NeuralNet_CalcLoss(NN, g_FpNNExpectedOutputs, DIGIT_COUNT, Params->L2Lambda);
+    }
+
+    const float *Outputs = NeuralNet_GetOutput(NN);
+    bool IsCorrect = FindMaxIndexFp32(Outputs, DIGIT_COUNT) == Params->Label;
+    return IsCorrect;
+}
+
+static void PrintVerdictFp32(neuralnet *NN, const verdict_config *Config)
+{
+    const float *Output = NeuralNet_GetOutput(NN);
+
+    if (Config->SampleCount == 1)
+    {
+        printf("Best guess: %d\n", FindMaxIndexFp32(Output, DIGIT_COUNT));
+        printf("Expected:    [");
+        for (int i = 0; i < DIGIT_COUNT; i++)
+            printf("%4.3f ", g_FpNNExpectedOutputs[i]);
+        printf("]\n");
+
+        printf("Digits 0..9: [");
+        for (int i = 0; i < DIGIT_COUNT; i++)
+            printf("%4.3f ", Output[i]);
+        printf("]\n");
+        printf("Correctness: [");
+        for (int i = 0; i < DIGIT_COUNT; i++)
+        {
+            if (i == Config->Labels[Config->SampleCount - 1])
+                printf("  %c   ", Output[i] > Config->TruePositiveThreshold? 'o' : 'X');
+            else
+                printf("  %c   ", Output[i] < Config->FalseNegativeThreshold? '_' : 'x');
+        }
+        printf("]\n");
+    }
+    float Precision = (float)Config->TruePositiveCount / (Config->SampleCount);
+    printf("Precision: %4.2f%% (%d/%d)\n", Precision * 100, Config->TruePositiveCount, Config->SampleCount);
+
+    /* param stats */
+    {
+        neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
+        printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f\n", 
+            Stats.WeightMin,
+            Stats.WeightMax,
+            Stats.BiasMin,
+            Stats.BiasMax
+        );
+    }
+
+    /* calc avg loss */
+    {
+        int LabelCounts[DIGIT_COUNT] = { 0 };
+        float AvgLosses[DIGIT_COUNT] = { 0 };
+        for (int i = 0; i < Config->SampleCount; i++)
+        {
+            int Label = Config->Labels[i];
+            float *LabelLoss = &AvgLosses[Label];
+            int *LabelCount = &LabelCounts[Label];
+
+            *LabelLoss += Config->Loss[i];
+            *LabelCount += 1;
+        }
+        for (int i = 0; i < DIGIT_COUNT; i++)
+        {
+            if (LabelCounts[i] > 1)
+                AvgLosses[i] /= (float)LabelCounts[i];
+        }
+
+        if (Config->SampleCount == 1)
+        {
+            printf("Loss = %f\n", AvgLosses[Config->Labels[0]]);
+        }
+        else
+        {
+            printf("AvgLoss:     [");
+            for (int i = 0; i < DIGIT_COUNT; i++)
+            {
+                printf("%4.3f ", AvgLosses[i]);
+            }
+            printf("]\n");
+        }
+    }
+    printf("----------------------------\n");
+}
+
 
 static void WriteTestSampleToFile(const char *FileName, const uint8_t *Data)
 {
@@ -388,6 +552,11 @@ int main(int ArgumentCount, char **Arguments)
             .LayerCount = MODEL_LAYER_COUNT,
             .NodeCountPerLayer = ModelArchitectureBuzzword,
         });
+        neuralnet Fp32NN = NeuralNet_Create(&(neuralnet_config) {
+            .InputCount = IMAGE_PIXEL_COUNT,
+            .LayerCount = MODEL_LAYER_COUNT,
+            .NodeCountPerLayer = ModelArchitectureBuzzword,
+        });
         printf("try 'h' for help\n");
         while (1)
         {
@@ -408,18 +577,21 @@ int main(int ArgumentCount, char **Arguments)
                     "    q    - quit\n"
                     "    i[n] - predict from given image with the name '%s[n].png',\n"
                     "             ex: 'input0.png' for image with number 0, command: 'i0'.\n"
-                    "    T    - train all from training sample '%s'\n"
-                    "    p    - predict a random sample from test suite '%s'\n"
-                    "    P    - predict all from test suite '%s'\n"
-                    "    r    - Reset all weights\n"
+                    "    T    - Train all from training sample '%s' (using int neural network)\n"
+                    "    F    - Train all from training sample '%s' (using fp32 neural network)\n"
+                    "    C    - Copy fp32 neural network to int\n"
+                    "    p    - Predict a random sample from test suite '%s' (int)\n"
+                    "    P    - Predict all from test suite '%s' (int)\n"
+                    "    r    - Reset all weights (int)\n"
                     "    l[f] - Set learning rate\n"
                     "             ex: 'l0.1'\n"
                     "    y[f] - Set L2 regularization lambda\n"
                     "             ex: 'y0.1'\n"
                     "    L    - Display learning rate\n"
                     "    Y    - Display L2 regularization lambda\n"
-                    "    I    - Toggle backpropagation for input prediction\n",
+                    "    I    - Toggle backpropagation for input prediction (int)\n",
                     InputFileName,
+                    TrainingFileName,
                     TrainingFileName,
                     TestingFileName,
                     TestingFileName
@@ -435,6 +607,11 @@ int main(int ArgumentCount, char **Arguments)
                 printf("Neural network randomized.\n");
             } break;
 
+            case 'C':
+            {
+                CopyNeuralNetToNnfxp(&NN, &Fp32NN);
+                printf("Neural network copied");
+            } break;
             case 'L':
             {
                 printf("Learning rate: %f\n", LearningRate);
@@ -465,7 +642,7 @@ int main(int ArgumentCount, char **Arguments)
                 }
             } break;
 
-            case 'T': /* train all (training dataset) */
+            case 'T': /* train all from training dataset (int) */
             {
                 int TruePositiveCount = 0;
                 double Start = clock();
@@ -493,6 +670,43 @@ int main(int ArgumentCount, char **Arguments)
                 printf("\ntime: %fs\n", Dt);
 
                 PrintVerdict(&NN, &(verdict_config) {
+                    .TruePositiveCount = TruePositiveCount,
+                    .FalseNegativeThreshold = (FalseNegativeThreshold),
+                    .TruePositiveThreshold = (TruePositiveThreshold),
+
+                    .SampleCount = TrainingSampleCount,
+                    .Labels = TrainingData.Labels,
+                    .Loss = TrainingLoss,
+                });
+            } break;
+            case 'F': /* train all from training dataset (fp32) */
+            {
+                int TruePositiveCount = 0;
+                double Start = clock();
+                {
+                    for (int i = 0; i < TrainingSampleCount; i++)
+                    {
+                        const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
+                        int Digit = TrainingData.Labels[i];
+                        printf("\rTraining in progress: %d/%d, precision: %4.2f%% (%d/%d)", 
+                            i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100, TruePositiveCount, TrainingSampleCount
+                        );
+                        bool Correct = PredictFp32(&Fp32NN, &(predict_params) {
+                            .Flags = PREDICT_FLAG_ENABLE_BACKPROP,
+                            .LearningRate = (LearningRate), 
+                            .Image = Sample,
+                            .Label = Digit, 
+                            .L2Lambda = (L2Lambda / TrainingSampleCount),
+
+                            .OutLoss = &TrainingLoss[i],
+                        });
+                        TruePositiveCount += Correct;
+                    }
+                }
+                double Dt = (clock() - Start) / CLOCKS_PER_SEC;
+                printf("\ntime: %fs\n", Dt);
+
+                PrintVerdictFp32(&Fp32NN, &(verdict_config) {
                     .TruePositiveCount = TruePositiveCount,
                     .FalseNegativeThreshold = (FalseNegativeThreshold),
                     .TruePositiveThreshold = (TruePositiveThreshold),
@@ -627,6 +841,7 @@ int main(int ArgumentCount, char **Arguments)
         }
 Out:
         Nnfxp_Destroy(&NN);
+        NeuralNet_Destroy(&Fp32NN);
     }
     free(CenteredImage);
     free(TrainingData.Arena);
