@@ -153,7 +153,7 @@ struct neuralnet_layer
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param);
 static float NN__DotProduct(const float *A, const float *B, int Length);
 static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, int ColA, int RowBT);
-static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col);
+static void NN__MatTranspose(float *Result, const float *Mat, int Row, int Col);
 static void NN__MatSubInPlace(float *Lhs, const float *Rhs, int Row, int Col);
 static void NN__MatScaleInPlace(float *Mat, float Scale, int Stride, int Row, int Col);
 static float NN__GetRandomValue(void);
@@ -192,7 +192,7 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
             int OutputCount = Config->NodeCountPerLayer[i];
 
             NN.Layers[i].Weights = NN__ALLOC(&NN, OutputCount*InputCountB*sizeof(NN.Layers[0].Weights[0]));
-            NN.Layers[i].Deltas = NN__ALLOC(&NN, OutputCount*sizeof(NN.Layers[0].Deltas[0]));
+            NN.Layers[i].Deltas = NN__ALLOC(&NN, (OutputCount + 1)*sizeof(NN.Layers[0].Deltas[0]));
             NN.Layers[i].Outputs = NN__ALLOC(&NN, (OutputCount + 1)*sizeof(NN.Layers[0].Outputs[0]));
             NN.Layers[i].InputCount = InputCount;
             NN.Layers[i].InputCountB = InputCountB;
@@ -309,12 +309,14 @@ void NeuralNet_Backprop(neuralnet *NN, neuralnet_backprop_config *Config)
             neuralnet_layer *Next = NN->Layers + i + 1;
             neuralnet_layer *Curr = NN->Layers + i;
 
-            NN__MatTranpose(NN->ScratchMatrix, Next->Weights, Next->InputCountB, Next->OutputCount);
+            /* TODO: benchmark transpose, because it is not cache friendly */
+            NN__MatTranspose(NN->ScratchMatrix, Next->Weights, Next->InputCountB, Next->OutputCount);
             NN__MatMulABT(
                 Curr->Deltas, 
                 NN->ScratchMatrix, Next->Deltas, 
                 Next->OutputCount, Next->InputCountB, 1
             );
+            /* NOTE: Next->InputCountB includes node with value 1.0 for bias, Curr->OutputCount does not */
             for (int k = 0; k < Next->InputCountB; k++)
             {
                 float Tmp = Config->LearningRate * NN__SigmoidDerivativeY(Curr->Outputs[k]);
@@ -626,7 +628,7 @@ static void NN__MatMulABT(float *Y, const float *A, const float *BT, int RowA, i
     }
 }
 
-static void NN__MatTranpose(float *Result, const float *Mat, int Row, int Col)
+static void NN__MatTranspose(float *Result, const float *Mat, int Row, int Col)
 {
     for (int c = 0; c < Col; c++)
     {
