@@ -2,19 +2,20 @@
 #define NNFXP_H
 
 /* this can be used independently from neuralnet.h */
+/* TODO: multiply-accumulate in wider type */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifndef nnfxp_type
-#  include <stdint.h>
-#  define NNFXP_TYPE_MAX INT8_MAX
-#  define NNFXP_TYPE_MIN INT8_MIN
-#  define nnfxp_type int8_t
-#  define nnfxp_utype uint8_t
+#  define NNFXP_TYPE_MAX INT32_MAX
+#  define NNFXP_TYPE_MIN INT32_MIN
+#  define nnfxp_type int32_t
+#  define nnfxp_utype uint32_t
 #endif /* nnfxp_type */
 
 #ifndef NNFXP_FRACTION_BITS
-#  define NNFXP_FRACTION_BITS 4
+#  define NNFXP_FRACTION_BITS 13
 #endif /* NNFXP_FRACTION_BITS */
 
 
@@ -26,6 +27,7 @@ typedef struct nnfxp_feedforward_config nnfxp_feedforward_config;
 typedef struct nnfxp_allocator_param nnfxp_allocator_param;
 typedef struct nnfxp_config nnfxp_config;
 typedef struct nnfxp_backprop_config nnfxp_backprop_config;
+typedef struct nnfxp_param_stats nnfxp_param_stats;
 typedef enum
 {
     NNFXP_ALLOCATE,
@@ -46,6 +48,12 @@ struct nnfxp_allocator_param
             void *Ptr;
         } Free;
     };
+};
+
+struct nnfxp_param_stats
+{
+    nnfxp_type WeightMin, WeightMax;
+    nnfxp_type BiasMin, BiasMax;
 };
 
 struct nnfxp_config
@@ -85,9 +93,38 @@ void Nnfxp_Destroy(nnfxp *NN);
 void Nnfxp_Randomize(nnfxp *NN);
 void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config);
 void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config);
-float Nnfxp_CalcLoss(nnfxp *NN, const nnfxp_type *ExpectedOutputs, int OutputCount, nnfxp_type L2Lambda);
+nnfxp_type Nnfxp_CalcLoss(nnfxp *NN, const nnfxp_type *ExpectedOutputs, int OutputCount, nnfxp_type L2Lambda);
 
 nnfxp_type *Nnfxp_GetOutputs(nnfxp *NN);
+void Nnfxp_Print(nnfxp *NN);
+
+
+#define NNFXP_FLT_EXTRACT_FRAC(val) ((val) - (float)(nnfxp_utype)(val))
+
+#define NNFXP_EXTRACT_FRAC(fxp) ((fxp) & (NNFXP_ONE - 1))
+#define NNFXP_EXTRACT_INT(fxp) ((fxp) >> NNFXP_FRACTION_BITS)
+
+#define NNFXP_ONE ((nnfxp_type)1 << NNFXP_FRACTION_BITS)
+#define NNFXP(constant) (nnfxp_type)((constant) * NNFXP_ONE)
+#define NNFXP_FLT(fxp) ((float)(fxp) / NNFXP_ONE)
+
+#define NNFXP_ADD(a, b) ((a) + (b))
+#define NNFXP_SUB(a, b) ((a) - (b))
+#define NNFXP_ADDI(x, i) NNFXP_ADD(x, (i)*NNFXP_ONE)
+#define NNFXP_SUBI(x, i) NNFXP_SUB(x, (i)*NNFXP_ONE)
+#define NNFXP_ADDC(x, constant) NNFXP_ADD(x, NNFXP(constant)) 
+#define NNFXP_SUBC(x, constant) NNFXP_SUB(x, NNFXP(constant))
+
+#define NNFXP_MUL(a, b) (((a) * (b)) >> (NNFXP_FRACTION_BITS))
+#define NNFXP_DIV(a, b) (((a) / (b)) << NNFXP_FRACTION_BITS)
+#define NNFXP_DIVL(a, b) ((((a) << NNFXP_FRACTION_BITS) / (b)))
+#define NNFXP_DIVR(a, b) (((a) / ((b) >> NNFXP_FRACTION_BITS)))
+#define NNFXP_MULI(x, i) ((x) * (i))
+#define NNFXP_DIVI(x, i) ((x) / (i))
+#define NNFXP_MULC(x, constant) NNFXP_MUL(x, NNFXP(constant))
+#define NNFXP_DIVC(x, constant) NNFXP_DIV(x, NNFXP(constant))
+
+
 
 
 struct nnfxp_layer
@@ -129,6 +166,7 @@ struct nnfxp
 
 #include <stdlib.h> /* malloc/free */
 #include <string.h> /* memcpy */
+#include <stdio.h> /* printf */
 #include <assert.h>
 
 
@@ -154,38 +192,6 @@ struct nnfxp
 #define NNFXP__SIMD_VEC_LEN 8
 #define NNFXP__MAX(a, b) ((a) > (b)? (a) : (b))
 #define NNFXP__MIN(a, b) ((a) < (b)? (a) : (b))
-
-#define NNFXP__FLT_EXTRACT_FRAC(val) ((val) - (double)(nnfxp_utype)(val))
-
-#define NNFXP__ONE ((nnfxp_utype)1 << NNFXP_FRACTION_BITS)
-#define NNFXP__EXTRACT_FRAC(fxp) ((fxp) & (NNFXP__ONE - 1))
-#define NNFXP__EXTRACT_INT(fxp) ((fxp) >> NNFXP_FRACTION_BITS)
-
-#define NNFXP(constant) (\
-        ((nnfxp_utype)(constant) << NNFXP_FRACTION_BITS) \
-        + (nnfxp_utype)(NNFXP__FLT_EXTRACT_FRAC(constant) * (double)NNFXP__ONE)\
-    )
-
-#define NNFXP__FLT(fxp) (\
-        (double)((fxp) >> NNFXP_FRACTION_BITS)casiopea best of session + (double)NNFXP__EXTRACT_FRAC(fxp) / NNFXP__ONE \
-    )
-
-#define NNFXP__ADD(a, b) ((a) + (b))
-#define NNFXP__SUB(a, b) ((a) - (b))
-#define NNFXP__ADDI(x, i) NNFXP__ADD(x, (i)*NNFXP__ONE)
-#define NNFXP__SUBI(x, i) NNFXP__SUB(x, (i)*NNFXP__ONE)
-#define NNFXP__ADDC(x, constant) NNFXP__ADD(x, NNFXP(constant)) 
-#define NNFXP__SUBC(x, constant) NNFXP__SUB(x, NNFXP(constant))
-
-#define NNFXP__MUL(a, b) (((a) * (b)) >> NNFXP_FRACTION_BITS)
-#define NNFXP__DIV(a, b) (((a) / (b)) << NNFXP_FRACTION_BITS)
-#define NNFXP__DIVL(a, b) ((((a) << NNFXP_FRACTION_BITS) / (b)))
-#define NNFXP__DIVR(a, b) (((a) / ((b) >> NNFXP_FRACTION_BITS)))
-#define NNFXP__MULI(x, i) ((x) * (i))
-#define NNFXP__DIVI(x, i) ((x) / (i))
-#define NNFXP__MULC(x, constant) NNFXP__MUL(x, NNFXP(constant))
-#define NNFXP__DIVC(x, constant) NNFXP__DIV(x, NNFXP(constant))
-
 
 
 
@@ -213,45 +219,50 @@ static nnfxp_type Nnfxp__Sigmoid(void *Data, nnfxp_type X)
     /* piecewise approx of 1/(1 + e^-x) */
     if (NNFXP__IN_RANGE(NNFXP(-1.0), X, NNFXP(1.0)))
     {
-        return NNFXP(0.5) + NNFXP__MUL(NNFXP(0.235), X);
+        return NNFXP(0.5) + NNFXP_MUL(NNFXP(0.235), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(-1.5), X, NNFXP(-1.0)))
     {
-        return NNFXP(0.445) + NNFXP__MUL(NNFXP(0.175), X);
+        return NNFXP(0.445) + NNFXP_MUL(NNFXP(0.175), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(1.0), X, NNFXP(1.5)))
     {
-        return NNFXP(0.555) + NNFXP__MUL(NNFXP(0.175), X);
+        return NNFXP(0.555) + NNFXP_MUL(NNFXP(0.175), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(-2.0), X, NNFXP(-1.5)))
     {
-        return NNFXP(0.3708) + NNFXP__MUL(NNFXP(0.126), X);
+        return NNFXP(0.3708) + NNFXP_MUL(NNFXP(0.126), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(1.5), X, NNFXP(2.0)))
     {
-        return NNFXP(0.6308) + NNFXP__MUL(NNFXP(0.126), X);
+        return NNFXP(0.6308) + NNFXP_MUL(NNFXP(0.126), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(-3.0), X, NNFXP(-2.0)))
     {
-        return NNFXP(0.26) + NNFXP__MUL(NNFXP(0.07178), X);
+        return NNFXP(0.26) + NNFXP_MUL(NNFXP(0.07178), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(2.0), X, NNFXP(3.0)))
     {
-        return NNFXP(0.74) + NNFXP__MUL(NNFXP(0.07178), X);
+        return NNFXP(0.74) + NNFXP_MUL(NNFXP(0.07178), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(-5.0), X, NNFXP(-3.0)))
     {
-        return NNFXP(0.105) + NNFXP__MUL(NNFXP(0.0203665), X);
+        return NNFXP(0.105) + NNFXP_MUL(NNFXP(0.0203665), X);
     }
     else if (NNFXP__IN_RANGE(NNFXP(3.0), X, NNFXP(5.0)))
     {
-        return NNFXP(0.895) + NNFXP__MUL(NNFXP(0.0203665), X);
+        return NNFXP(0.895) + NNFXP_MUL(NNFXP(0.0203665), X);
     }
     else if (X > NNFXP(5))
     {
-        return 1;
+        return NNFXP_ONE;
     }
     return 0;
+}
+
+static nnfxp_type Nnfxp__SigmoidDerivativeY(nnfxp_type Y)
+{
+    return NNFXP_MUL(Y, (NNFXP_ONE - Y));
 }
 
 static nnfxp_type Nnfxp__DotProduct(const nnfxp_type *A, const nnfxp_type *B, int Length)
@@ -259,7 +270,7 @@ static nnfxp_type Nnfxp__DotProduct(const nnfxp_type *A, const nnfxp_type *B, in
     nnfxp_type Result = 0;
     for (int i = 0; i < Length; i++)
     {
-        Result += NNFXP__MUL(A[i], B[i]);
+        Result += NNFXP_MUL(A[i], B[i]);
     }
     return Result;
 }
@@ -271,13 +282,50 @@ static void Nnfxp__MatMulABT(nnfxp_type *Out, const nnfxp_type *A, const nnfxp_t
     {
         for (int Rbt = 0; Rbt < RowBT; Rbt++)
         {
-            const nnfxp_type *RowMatA = A + Ca*RowBT;
+            const nnfxp_type *RowMatA = A + Ca*RowA;
             const nnfxp_type *ColMatB = BT + Rbt*RowA;
             nnfxp_type Dp = Nnfxp__DotProduct(RowMatA, ColMatB, RowA);
             Out[Ca*RowBT + Rbt] = Dp;
         }
     }
 }
+
+static void Nnfxp__MatScaleInPlace(nnfxp_type *Mat, nnfxp_type Scale, int Stride, int Row, int Col)
+{
+    for (int y = 0; y < Col; y++)
+    {
+        /* compiler was able to vectorize the code with -O3 */
+        for (int x = 0; x < Row; x++)
+        {
+            int Index = y*Stride + x;
+            Mat[Index] = NNFXP_MUL(Mat[Index], Scale);
+        }
+    }
+}
+
+static void Nnfxp__MatSubInPlace(nnfxp_type *Lhs, nnfxp_type *Rhs, int Row, int Col)
+{
+    for (int i = 0; i < Col; i++)
+    {
+        for (int k = 0; k < Row; k++)
+        {
+            int Index = k + i*Row;
+            Lhs[Index] -= Rhs[Index];
+        }
+    }
+}
+
+static void Nnfxp__MatTranspose(nnfxp_type *Result, const nnfxp_type *Mat, int Row, int Col)
+{
+    for (int c = 0; c < Col; c++)
+    {
+        for (int r = 0; r < Row; r++)
+        {
+            Result[r*Col + c] = Mat[r + c*Row];
+        }
+    }
+}
+
 
 
 
@@ -332,7 +380,7 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
             int OutputCount = Config->NodeCountPerLayer[i];
 
             NN->Layers[i].Weights = NNFXP__ALLOC(NN, OutputCount*InputCountB*sizeof(NN->Layers[0].Weights[0]));
-            NN->Layers[i].Deltas = NNFXP__ALLOC(NN, OutputCount*sizeof(NN->Layers[0].Deltas[0]));
+            NN->Layers[i].Deltas = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Deltas[0]));
             NN->Layers[i].Outputs = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Outputs[0]));
             NN->Layers[i].InputCount = InputCount;
             NN->Layers[i].InputCountB = InputCountB;
@@ -363,20 +411,20 @@ void Nnfxp_Destroy(nnfxp *NN)
 
 void Nnfxp_Randomize(nnfxp *NN)
 {
-    NN->Inputs[NN->InputCountB - 1] = NNFXP__ONE;
+    NN->Inputs[NN->InputCountB - 1] = NNFXP_ONE;
     for (int i = 0; i < NN->LayerCount; i++)
     {
         nnfxp_layer *Layer = NN->Layers + i;
         for (int k = 0; k < Layer->OutputCount; k++)
         {
             Layer->Outputs[k] = NNFXP__RAND(NN);
-            for (int j = 0; j < Layer->InputCount; j++)
+            for (int j = 0; j < Layer->InputCountB; j++)
             {
                 Layer->Weights[k*Layer->InputCountB + j] = NNFXP__RAND(NN);
             }
         }
         /* NOTE: for biases */
-        Layer->Outputs[Layer->OutputCount] = NNFXP__ONE;
+        Layer->Outputs[Layer->OutputCount] = NNFXP_ONE;
     }
 }
 
@@ -384,21 +432,25 @@ void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config)
 {
     assert(Config->Inputs && Config->InputCount == NN->InputCount);
     memcpy(NN->Inputs, Config->Inputs, Config->InputCount*sizeof(NN->Inputs[0]));
+    NN->Inputs[NN->InputCountB - 1] = NNFXP_ONE;
     nnfxp_activation_callback ActivationFn = NN->ActivationCallback;
     assert(ActivationFn);
 
     const nnfxp_type *X = NN->Inputs;
     for (int i = 0; i < NN->LayerCount; i++)
     {
-        nnfxp_layer *Layer = NN->Layers + i;
+        nnfxp_layer *Layer = &NN->Layers[i];
+        assert(X[Layer->InputCountB - 1] == NNFXP_ONE);
+
         Nnfxp__MatMulABT(
             Layer->Outputs, Layer->Weights, X,
-            Layer->OutputCount, Layer->InputCountB, 1
+            Layer->InputCountB, Layer->OutputCount, 1
         );
 
-        for (int k = 0; k < Layer->OutputCount; k++)
+        /* NOTE: normalize outputs via activation fn ("squish" Y from -inf..+inf to 0..1) */
+        for (int r = 0; r < Layer->OutputCount; r++)
         {
-            Layer->Outputs[k] = ActivationFn(NN->ActivationData, Layer->Outputs[k]);
+            Layer->Outputs[r] = ActivationFn(NN->ActivationData, Layer->Outputs[r]);
         }
 
         X = Layer->Outputs;
@@ -407,6 +459,166 @@ void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config)
 
 void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
 {
+    /* deltas */
+    {
+        const nnfxp_layer *Last = NN->Layers + NN->LayerCount - 1;
+        assert(Config->ExpectedOutputCount == Last->OutputCount);
+
+        /* compute output layer deltas */
+        for (int i = 0; i < Last->OutputCount; i++)
+        {
+            nnfxp_type Error = Last->Outputs[i] - Config->ExpectedOutputs[i];
+            /* NOTE: hack, learning rate should be present during weight/bias update, not during delta calculation */
+            Last->Deltas[i] = NNFXP_MUL(NNFXP_MUL(Config->LearningRate, Error), Nnfxp__SigmoidDerivativeY(Last->Outputs[i]));
+        }
+
+        /* compute hidden layer deltas */
+        for (int i = NN->LayerCount - 2; i >= 0; i--)
+        {
+            nnfxp_layer *Next = NN->Layers + i + 1;
+            nnfxp_layer *Curr = NN->Layers + i;
+
+            /* TODO: benchmark transpose, because it is not cache friendly */
+            Nnfxp__MatTranspose(NN->ScratchMatrix, Next->Weights, Next->InputCountB, Next->OutputCount);
+            Nnfxp__MatMulABT(
+                Curr->Deltas, 
+                NN->ScratchMatrix, Next->Deltas, 
+                Next->OutputCount, Next->InputCountB, 1
+            );
+            /* NOTE: Next->InputCountB includes node with value 1.0 for bias, Curr->OutputCount does not */
+            for (int k = 0; k < Next->InputCountB; k++)
+            {
+                nnfxp_type Tmp = NNFXP_MUL(Config->LearningRate, Nnfxp__SigmoidDerivativeY(Curr->Outputs[k]));
+                Curr->Deltas[k] = NNFXP_MUL(Curr->Deltas[k], Tmp);
+            }
+        }
+    }
+
+    nnfxp_type L2Regularization = NNFXP_ONE - Config->L2Lambda;
+
+    /* update weights and biases */
+    int InputCount = NN->InputCount;
+    int InputCountB = NN->InputCountB;
+    nnfxp_type *Inputs = NN->Inputs;
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        nnfxp_layer *Curr = NN->Layers + i;
+        Nnfxp__MatMulABT(NN->ScratchMatrix, Curr->Deltas, Inputs, 1, Curr->OutputCount, InputCountB);
+        /* NOTE: scaling the weights will not affect biases because InputCountB is the stride, InputCount is the row length */
+        Nnfxp__MatScaleInPlace(Curr->Weights, L2Regularization, InputCountB, InputCount, Curr->OutputCount);
+        Nnfxp__MatSubInPlace(Curr->Weights, NN->ScratchMatrix, InputCountB, Curr->OutputCount);
+
+        Inputs = Curr->Outputs;
+        InputCount = Curr->OutputCount;
+        InputCountB = Curr->OutputCount + 1;
+    }}
+
+
+nnfxp_param_stats Nnfxp_GetParamStats(const nnfxp *NN)
+{
+    nnfxp_param_stats Stats = { 
+        .BiasMax = NNFXP_TYPE_MIN,
+        .BiasMin = NNFXP_TYPE_MAX,
+        .WeightMax = NNFXP_TYPE_MIN,
+        .WeightMin = NNFXP_TYPE_MAX,
+    };
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        nnfxp_layer *Layer = NN->Layers + i;
+        for (int k = 0; k < Layer->OutputCount; k++)
+        {
+            int Col = k*Layer->InputCountB;
+            for (int j = 0; j < Layer->InputCount; j++)
+            {
+                int Index = Col + j;
+                Stats.WeightMax = NNFXP__MAX(Stats.WeightMax, Layer->Weights[Index]);
+                Stats.WeightMin = NNFXP__MIN(Stats.WeightMin, Layer->Weights[Index]);
+            }
+
+            Stats.BiasMax = NNFXP__MAX(Stats.BiasMax, Layer->Weights[Col + Layer->InputCountB - 1]);
+            Stats.BiasMin = NNFXP__MIN(Stats.BiasMin, Layer->Weights[Col + Layer->InputCountB - 1]);
+        }
+    }
+    return Stats;
+}
+
+/* MSE + L2 regularization */
+nnfxp_type Nnfxp_CalcLoss(nnfxp *NN, const nnfxp_type *ExpectedOutputs, int OutputCount, nnfxp_type L2Lambda)
+{
+    nnfxp_type Sum = 0;
+    const nnfxp_type *Outputs = Nnfxp_GetOutputs(NN);
+    for (int i = 0; i < OutputCount; i++)
+    {
+        nnfxp_type Tmp = (ExpectedOutputs[i] - Outputs[i]);
+        Sum += NNFXP_MUL(Tmp, Tmp);
+    }
+
+    nnfxp_type L2 = 0;
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        nnfxp_type Sum = 0;
+        nnfxp_layer *Layer = NN->Layers + i;
+        for (int h = 0; h < Layer->OutputCount; h++)
+        {
+            nnfxp_type *WeightPtr = Layer->Weights + h*Layer->InputCountB;
+            for (int k = 0; k < Layer->InputCount; k++)
+            {
+                nnfxp_type Weight = *WeightPtr++;
+                Sum += NNFXP_MUL(Weight, Weight);
+            }
+        }
+        L2 += Sum;
+    }
+    return NNFXP_MUL(Sum, NNFXP(0.5)) + NNFXP_MUL(NNFXP(0.5), NNFXP_MUL(L2, L2Lambda));
+}
+
+nnfxp_type *Nnfxp_GetOutputs(nnfxp *NN)
+{
+    return NN->Layers[NN->LayerCount - 1].Outputs;
+}
+
+void Nnfxp_Print(nnfxp *NN)
+{
+    printf("Inputs: [");
+    for (int i = 0; i < NN->InputCount; i++)
+    {
+        printf("%g ", NNFXP_FLT(NN->Inputs[i]));
+    }
+    printf("]\n");
+
+    printf("Layers: %d\n", NN->LayerCount);
+    for (int i = 0; i < NN->LayerCount; i++)
+    {
+        const nnfxp_layer *Layer = NN->Layers + i;
+        printf("    layer %d: in/out: %d/%d\n", i, Layer->InputCount, Layer->OutputCount);
+
+        printf("        node vals:  [ ");
+        for (int k = 0; k < Layer->OutputCount + 1; k++)
+            printf("%6.3f ", NNFXP_FLT(Layer->Outputs[k]));
+        printf("]\n");
+
+        printf("        node delta: [ ");
+        for (int k = 0; k < Layer->OutputCount; k++)
+            printf("%6.3f ", NNFXP_FLT(Layer->Deltas[k]));
+        printf("]\n");
+
+        printf("        weights:\n");
+        for (int k = 0; k < Layer->OutputCount; k++)
+        {
+            printf("            [ ");
+            for (int j = 0; j < Layer->InputCountB; j++)
+            {
+                printf("%6.3f ", NNFXP_FLT(Layer->Weights[j + k*Layer->InputCountB]));
+            }
+            printf("]\n");
+        }
+    }
+
+    printf("Neural network output: [ ");
+    for (int i = 0; i < NN->Layers[NN->LayerCount - 1].OutputCount; i++)
+        printf("%g ", NNFXP_FLT(NN->Layers[NN->LayerCount - 1].Outputs[i]));
+    printf("]\n");
+
 }
 
 #endif
