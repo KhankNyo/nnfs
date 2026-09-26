@@ -13,7 +13,7 @@
 #define IMAGE_IMPLEMENTATION
 #include "extern/image.h"
 
-#define NNFXP_FRACTION_BITS 8
+#define NNFXP_FRACTION_BITS 10
 #define nnfxp_xtype int32_t
 #define nnfxp_type int16_t
 #define nnfxp_utype uint16_t
@@ -583,6 +583,7 @@ int main(int ArgumentCount, char **Arguments)
                     "    p    - Predict a random sample from test suite '%s' (int)\n"
                     "    P    - Predict all from test suite '%s' (int)\n"
                     "    r    - Reset all weights (int)\n"
+                    "    R    - Reset all weights (fp32)\n"
                     "    l[f] - Set learning rate\n"
                     "             ex: 'l0.1'\n"
                     "    y[f] - Set L2 regularization lambda\n"
@@ -715,6 +716,11 @@ int main(int ArgumentCount, char **Arguments)
                     .Labels = TrainingData.Labels,
                     .Loss = TrainingLoss,
                 });
+            } break;
+            case 'R':
+            {
+                NeuralNet_Randomize(&Fp32NN);
+                printf("Fp32 neural network randomized\n");
             } break;
             case 'p': /* predict a random sample from test suite */
             {
