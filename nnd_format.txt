@@ -15,8 +15,8 @@ byte offset         | type name, description
 4..7                | uint32 version:
                             should be 1
 8..15               | flag_uint64 flags
-16..23              | uint64 wo, offset to weight data from the beginning of file
 24..31              | uint64 ao, offset to arbitrary data from the beginning of file
+16..23              | uint64 wo, offset to weight data from the beginning of file
 32..39              | uint64 wsb, size of weight data in bytes
 40..43              | type_uint32 wt, weight_type
 44..47              | uint32 w_decimal_place:
@@ -31,7 +31,7 @@ byte offset         | type name, description
                                  contains the power of 2 that was used to scale qscalar_inv_shifted
                             else
                                  ignore, should be 0
-56..63              | char[8] qscalar_inv_shifted: 
+56..63              | uint8[8] qscalar_inv_shifted: 
                             if qscalar_type is (U)INT* and (flags & NND_FLAG_QUANTIZED):
                                  contains the inverse of quantization scalar (1/s) scaled in fixed point:
                                  (1/s * 2^qscalar_shamt)

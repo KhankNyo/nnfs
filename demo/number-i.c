@@ -30,17 +30,12 @@
 
 
 #define WEIGHT_FILE_NAME "number-i-weights"
-#define WEIGHT_FILE_QSCALAR_INV g_QScalarInv
-#define WEIGHT_FILE_QSCALAR_INV_SHIFT g_QScalarInvShift
-#define WEIGHT_FILE_INPUT_COUNT g_InputCount
-#define WEIGHT_FILE_LAYER_COUNT g_LayerCount
-#define WEIGHT_FILE_NODE_PER_LAYER_COUNT g_NodePerLayerCount
-#define WEIGHT_FILE_WEIGHTS g_Weights
+#define WEIGHT_FILE_VARIABLE_NAME g_Model
 #define STRFY1(x) #x
 #define STRFY(x) STRFY1(x)
-#define COMPRESSED_WEIGHT_TYPE NNS_NUMERIC_TYPE_INT8
-#define ARITH_TYPE NNS_NUMERIC_TYPE_INT16
-#define INFO_TYPE NNS_NUMERIC_TYPE_INT32
+#define COMPRESSED_WEIGHT_TYPE NND_TYPE_INT8
+#define ARITH_TYPE NND_TYPE_INT16
+#define INFO_TYPE NND_TYPE_INT32
 #define IMAGE_WIDTH 28
 #define IMAGE_HEIGHT 28
 #define IMAGE_CHANNEL_COUNT 4
@@ -572,13 +567,13 @@ int main(int ArgumentCount, char **Arguments)
 #else
         Nnfxp_Deserialize(&NN, &(nnfxp_deserialize_config) {
             .NnConfig = {
-                .InputCount = IMAGE_PIXEL_COUNT,
-                .LayerCount = MODEL_LAYER_COUNT,
-                .NodeCountPerLayer = ModelArchitectureBuzzword,
+                .InputCount = WEIGHT_FILE_VARIABLE_NAME.InputCount,
+                .LayerCount = WEIGHT_FILE_VARIABLE_NAME.LayerCount,
+                .NodeCountPerLayer = WEIGHT_FILE_VARIABLE_NAME.NodeCountPerLayer,
             },
-            .QScalarInv = WEIGHT_FILE_QSCALAR_INV,
-            .QScalarInvShift = WEIGHT_FILE_QSCALAR_INV_SHIFT,
-            .Weights = WEIGHT_FILE_WEIGHTS,
+            .QScalarInv = WEIGHT_FILE_VARIABLE_NAME.QScalarInvShifted,
+            .QScalarInvShift = WEIGHT_FILE_VARIABLE_NAME.QScalarInvShamt,
+            .Weights = WEIGHT_FILE_VARIABLE_NAME.Weights,
         });
 #endif
         neuralnet Fp32NN = NeuralNet_Create(&(neuralnet_config) {
@@ -675,9 +670,9 @@ int main(int ArgumentCount, char **Arguments)
             } break;
             case 's':
             {
-                const char *ErrMsg = NeuralNet_Serialize(&Fp32NN, &(neuralnet_serialize_config) {
-                    .Flags = NNS_FLAG_ENABLE_QUANTIZATION,
-                    .FileFormat = NNS_FILE_FORMAT_C,
+                const char *ErrMsg = NeuralNet_Serialize(&Fp32NN, &(nnd_serialize_config) {
+                    .Flags = NND_FLAG_ENABLE_QUANTIZATION,
+                    .FileFormat = NND_FILE_FORMAT_C,
                     .WeightType = COMPRESSED_WEIGHT_TYPE,
                     .QScalarInvType = ARITH_TYPE,
                     .InfoType = INFO_TYPE,
@@ -685,12 +680,7 @@ int main(int ArgumentCount, char **Arguments)
                     .QScalarFxpShift = NNFXP_FRACTION_BITS,
                     .FileFormatC = {
                         .HeaderGuard = "WEIGHTS_H",
-                        .QScalarInvName = STRFY(WEIGHT_FILE_QSCALAR_INV),
-                        .QScalarInvShiftName = STRFY(WEIGHT_FILE_QSCALAR_INV_SHIFT),
-                        .InputCountName = STRFY(WEIGHT_FILE_INPUT_COUNT),
-                        .LayerCountName = STRFY(WEIGHT_FILE_LAYER_COUNT),
-                        .NodePerLayerCountName = STRFY(WEIGHT_FILE_NODE_PER_LAYER_COUNT),
-                        .WeightsName = STRFY(WEIGHT_FILE_WEIGHTS),
+                        .VariableName = STRFY(WEIGHT_FILE_VARIABLE_NAME),
                     },
                 });
                 if (ErrMsg)

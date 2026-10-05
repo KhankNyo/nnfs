@@ -2,6 +2,7 @@
 #define NEURALNET_H
 
 #include <stdbool.h>
+#include "nnd.h"
 
 typedef struct neuralnet neuralnet;
 typedef struct neuralnet_layer neuralnet_layer;
@@ -10,27 +11,11 @@ typedef struct neuralnet_backprop_config neuralnet_backprop_config;
 typedef struct neuralnet_feedforward_config neuralnet_feedforward_config;
 typedef struct neuralnet_allocator_param neuralnet_allocator_param;
 typedef struct neuralnet_param_stats neuralnet_param_stats;
-typedef struct neuralnet_serialize_config neuralnet_serialize_config;
-typedef enum 
-{
-    NNS_FILE_FORMAT_C = 0,
-} neuralnet_serialize_file_format;
-typedef enum
-{
-    NNS_NUMERIC_TYPE_INT32 = 0,
-    NNS_NUMERIC_TYPE_INT16 = 1,
-    NNS_NUMERIC_TYPE_INT8 = 2,
-    NNS_NUMERIC_TYPE_FP32 = 3,
-} neuralnet_numeric_type;
 typedef enum 
 {
     NNALLOC_ALLOCATE,
     NNALLOC_FREE,
 } neuralnet_allocator_mode;
-typedef enum
-{
-    NNS_FLAG_ENABLE_QUANTIZATION = 1 << 0,
-} neuralnet_serialize_flags;
 typedef float (*neuralnet_activation_fn)(float Value);
 typedef void *(*neuralnet_allocator_callback)(void *AllocatorData, neuralnet_allocator_param *Param);
 
@@ -40,36 +25,13 @@ struct neuralnet_config
     int InputCount;
 
     int LayerCount;
-    int *NodeCountPerLayer;
+    const int *NodeCountPerLayer;
 
     /* again, not the focal point. Can provide NULL to AllocatorData and AllocatorCallback use the default allocators (malloc && free) */
     void *AllocatorData;
     neuralnet_allocator_callback AllocatorCallback;
 };
 
-
-struct neuralnet_serialize_config
-{
-    neuralnet_serialize_flags Flags;
-    neuralnet_serialize_file_format FileFormat;
-    neuralnet_numeric_type WeightType;      /* type for compressed weight */
-    neuralnet_numeric_type QScalarInvType;  /* type for quantization scalar factor (inverse, preferably machine word type) */
-    neuralnet_numeric_type InfoType;        /* type for integer info (layer count, input count, preferably integer) */
-    const char *FilePathNoExtension;
-    int QScalarFxpShift;                    /* output QScalarInv = 2^(QScalarFxpShift + QScalarInvShift) / (QScalar * 2^QScalarFxpShift) */
-
-    union {
-        struct {
-            const char *HeaderGuard;
-            const char *QScalarInvName;     /* WordType */
-            const char *QScalarInvShiftName;/* InfoType */
-            const char *InputCountName;     /* InfoType */
-            const char *LayerCountName;     /* InfoType */
-            const char *NodePerLayerCountName; /* InfoType */
-            const char *WeightsName;        /* QuantizeType */
-        } FileFormatC;
-    };
-};
 
 struct neuralnet_backprop_config
 {
@@ -112,8 +74,6 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config);
 neuralnet NeuralNet_CheapCopy(const neuralnet *NN);
 void NeuralNet_Destroy(neuralnet *NN);
 
-/* returns NULL if there are no error, otherwise returns an error message (static lifetime, DO NOT call free) */
-const char *NeuralNet_Serialize(const neuralnet *NN, neuralnet_serialize_config *Config);
 void NeuralNet_Randomize(neuralnet *NN);
 void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config);
 void NeuralNet_Backprop(neuralnet *NN, neuralnet_backprop_config *Config);
@@ -123,13 +83,19 @@ float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int Output
 void NeuralNet_Print(const neuralnet *NN);
 float *NeuralNet_GetOutput(neuralnet *NN);
 
+/* returns NULL if there are no error, otherwise returns an error message (static lifetime, DO NOT call free) */
+const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Config);
+
 
 struct neuralnet
 {
     int InputCountB;
     int InputCount;
-    float *Inputs;
+    int64_t WeightCount;
+    unsigned char *Arena;
+    const float *Weights;
     float *ScratchMatrix;
+    float *Inputs;
 
     int LayerCount;
     neuralnet_layer *Layers;
@@ -168,6 +134,9 @@ struct neuralnet_layer
 #include <math.h>
 #include <float.h>
 #include <string.h>
+
+#define NND_IMPLEMENTATION
+#include "nnd.h"
 
 
 #define NN__ALLOC(p_nn, size_bytes) \
@@ -223,20 +192,54 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
         NN.AllocatorData = NULL;
     }
 
+    /* calc mem */
+    uint8_t *Arena = NULL;
+    float *WeightArena = NULL;
+#define NN__ARENA_ALLOC(arena, sizebytes) (void *)((arena += sizebytes), arena - (sizebytes))
+    {
+        int64_t WeightSizeBytes = 0;
+        int64_t SizeBytes = sizeof(NN.Inputs[0]) * NN.InputCountB
+                        + sizeof(NN.Layers[0]) * NN.LayerCount;
+        int InputCountB = NN.InputCountB;
+        int LargestSide = InputCountB;
+        for (int i = 0; i < Config->LayerCount; i++)
+        {
+            int OutputCount = Config->NodeCountPerLayer[i];
+            int WeightCount = OutputCount*InputCountB;
+
+            WeightSizeBytes += WeightCount*sizeof(NN.Layers[0].Weights[0]);
+            SizeBytes += WeightCount*sizeof(NN.Layers[0].Weights[0]);
+            SizeBytes += (OutputCount + 1)*sizeof(NN.Layers[0].Deltas[0]);
+            SizeBytes += (OutputCount + 1)*sizeof(NN.Layers[0].Outputs[0]);
+
+            InputCountB = OutputCount + 1;
+            LargestSide = NN__MAX(OutputCount + 1, LargestSide);
+        }
+        SizeBytes += LargestSide*LargestSide*sizeof(NN.ScratchMatrix[0]);
+
+        Arena = NN__ALLOC(&NN, SizeBytes);
+        NN.Arena = Arena;
+        WeightArena = NN__ARENA_ALLOC(Arena, WeightSizeBytes);
+        NN.Weights = WeightArena;
+    }
+
     /* allocate needed mem */
     {
-        NN.Inputs = NN__ALLOC(&NN, sizeof(NN.Inputs[0]) * NN.InputCountB);
-        NN.Layers = NN__ALLOC(&NN, sizeof(NN.Layers[0]) * NN.LayerCount);
+        NN.Inputs = NN__ARENA_ALLOC(Arena, sizeof(NN.Inputs[0]) * NN.InputCountB);
+        NN.Layers = NN__ARENA_ALLOC(Arena, sizeof(NN.Layers[0]) * NN.LayerCount);
+        NN.WeightCount = 0;
         int InputCount = NN.InputCount;
         int InputCountB = NN.InputCountB;
         int LargestSide = InputCountB;
         for (int i = 0; i < Config->LayerCount; i++)
         {
             int OutputCount = Config->NodeCountPerLayer[i];
+            int WeightCount = OutputCount*InputCountB;
 
-            NN.Layers[i].Weights = NN__ALLOC(&NN, OutputCount*InputCountB*sizeof(NN.Layers[0].Weights[0]));
-            NN.Layers[i].Deltas = NN__ALLOC(&NN, (OutputCount + 1)*sizeof(NN.Layers[0].Deltas[0]));
-            NN.Layers[i].Outputs = NN__ALLOC(&NN, (OutputCount + 1)*sizeof(NN.Layers[0].Outputs[0]));
+            NN.WeightCount += WeightCount;
+            NN.Layers[i].Weights = NN__ARENA_ALLOC(WeightArena, WeightCount);
+            NN.Layers[i].Deltas = NN__ARENA_ALLOC(Arena, (OutputCount + 1)*sizeof(NN.Layers[0].Deltas[0]));
+            NN.Layers[i].Outputs = NN__ARENA_ALLOC(Arena, (OutputCount + 1)*sizeof(NN.Layers[0].Outputs[0]));
             NN.Layers[i].InputCount = InputCount;
             NN.Layers[i].InputCountB = InputCountB;
             NN.Layers[i].OutputCount = OutputCount;
@@ -245,8 +248,9 @@ neuralnet NeuralNet_Create(const neuralnet_config *Config)
             InputCountB = OutputCount + 1;
             LargestSide = NN__MAX(OutputCount + 1, LargestSide);
         }
-        NN.ScratchMatrix = NN__ALLOC(&NN, LargestSide*LargestSide*sizeof(NN.ScratchMatrix[0]));
+        NN.ScratchMatrix = NN__ARENA_ALLOC(Arena, LargestSide*LargestSide*sizeof(NN.ScratchMatrix[0]));
     }
+#undef NN__ARENA_ALLOC
 
     NeuralNet_Randomize(&NN);
     return NN;
@@ -275,15 +279,7 @@ neuralnet NeuralNet_CheapCopy(const neuralnet *NN)
 
 void NeuralNet_Destroy(neuralnet *NN)
 {
-    for (int i = 0; i < NN->LayerCount; i++)
-    {
-        NN__FREE(NN, NN->Layers[i].Weights);
-        NN__FREE(NN, NN->Layers[i].Deltas);
-        NN__FREE(NN, NN->Layers[i].Outputs);
-    }
-    NN__FREE(NN, NN->Layers);
-    NN__FREE(NN, NN->Inputs);
-    NN__FREE(NN, NN->ScratchMatrix);
+    NN__FREE(NN, NN->Arena);
 }
 
 void NeuralNet_FeedForward(neuralnet *NN, const neuralnet_feedforward_config *Config)
@@ -534,252 +530,12 @@ float *NeuralNet_GetOutput(neuralnet *NN)
     return NN->Layers[NN->LayerCount - 1].Outputs;
 }
 
-static const char *NN__NumericTypeToCType(neuralnet_numeric_type NumericType)
-{
-    const char *Type = NULL;
-    switch (NumericType)
-    {
-    case NNS_NUMERIC_TYPE_FP32: Type = "float"; break;
-    case NNS_NUMERIC_TYPE_INT8: Type = "int8_t"; break;
-    case NNS_NUMERIC_TYPE_INT16: Type = "int16_t"; break;
-    case NNS_NUMERIC_TYPE_INT32: Type = "int32_t"; break;
-    }
-    return Type;
-}
-static void NN__SerializeInt(FILE *File, neuralnet_numeric_type DstType, int32_t Value)
-{
-    switch (DstType)
-    {
-    case NNS_NUMERIC_TYPE_INT8:
-    {
-        assert(NN__INRANGE(INT8_MIN, Value, INT8_MAX));
-        fprintf(File, "%d", Value);
-    } break;
-    case NNS_NUMERIC_TYPE_INT16:
-    {
-        assert(NN__INRANGE(INT16_MIN, Value, INT16_MAX));
-        fprintf(File, "%d", Value);
-    } break;
-    case NNS_NUMERIC_TYPE_INT32:
-    {
-        fprintf(File, "%d", Value);
-    } break;
-    case NNS_NUMERIC_TYPE_FP32:
-    {
-        assert(false && "Unreachable");
-    } break;
-    }
-}
 
-static void NN__SerializeValueToCSource(FILE *File, neuralnet_numeric_type DstType, neuralnet_numeric_type SrcType, const void *Src)
-{
-    switch (SrcType)
-    {
-    case NNS_NUMERIC_TYPE_INT8:
-    {
-        int8_t Value = 0;
-        memcpy(&Value, Src, sizeof Value);
-        NN__SerializeInt(File, DstType, Value);
-    } break;
-    case NNS_NUMERIC_TYPE_INT16:
-    {
-        int16_t Value = 0;
-        memcpy(&Value, Src, sizeof Value);
-        NN__SerializeInt(File, DstType, Value);
-    } break;
-    case NNS_NUMERIC_TYPE_INT32:
-    {
-        int32_t Value = 0;
-        memcpy(&Value, Src, sizeof Value);
-        NN__SerializeInt(File, DstType, Value);
-    } break;
-    case NNS_NUMERIC_TYPE_FP32:
-    {
-        float Value = 0;
-        memcpy(&Value, Src, sizeof Value);
-        switch (DstType)
-        {
-        case NNS_NUMERIC_TYPE_FP32:
-        {
-            fprintf(File, "%f", Value);
-        } break;
-        case NNS_NUMERIC_TYPE_INT8:
-        {
-            int8_t Result = NN__CLAMP(INT8_MIN, Value, INT8_MAX);
-            fprintf(File, "%d", Result);
-        } break;
-        case NNS_NUMERIC_TYPE_INT16:
-        {
-            int16_t Result = NN__CLAMP(INT16_MIN, Value, INT16_MAX);
-            fprintf(File, "%d", Result);
-        } break;
-        case NNS_NUMERIC_TYPE_INT32:
-        {
-            int32_t Result = NN__CLAMP(INT32_MIN, Value, INT32_MAX);
-            fprintf(File, "%d", Result);
-        } break;
-        }
-    } break;
-    }
-}
-
-static void NN__QuantizeValue(neuralnet_numeric_type DstType, void *Dst, float QScalar, float QValue)
-{
-    float Result = QScalar * QValue + 0.5;
-    switch (DstType)
-    {
-    case NNS_NUMERIC_TYPE_FP32:
-    {
-        memcpy(Dst, &Result, sizeof Result);
-    } break;
-    case NNS_NUMERIC_TYPE_INT8:
-    {
-        int8_t Value = NN__CLAMP(INT8_MIN, Result, INT8_MAX);
-        memcpy(Dst, &Value, sizeof Value);
-    } break;
-    case NNS_NUMERIC_TYPE_INT16:
-    {
-        int16_t Value = NN__CLAMP(INT16_MIN, Result, INT16_MAX);
-        memcpy(Dst, &Value, sizeof Value);
-    } break;
-    case NNS_NUMERIC_TYPE_INT32:
-    {
-        int32_t Value = NN__CLAMP(INT32_MIN, Result, INT32_MAX);
-        memcpy(Dst, &Value, sizeof Value);
-    } break;
-    }
-}
-
-static const char *NN__SerializeToCSource(
-    const neuralnet *NN, 
-    neuralnet_serialize_config *Config, 
-    float QScalarInvShifted, int32_t FxpShift
-) {
-    const char *WeightType = NN__NumericTypeToCType(Config->WeightType);
-    const char *QScalarInvType = NN__NumericTypeToCType(Config->QScalarInvType);
-    const char *IType = NN__NumericTypeToCType(Config->InfoType);
-
-    char HeaderFileName[256], SourceFileName[256];
-    snprintf(HeaderFileName, sizeof HeaderFileName, "%s.h", Config->FilePathNoExtension);
-    snprintf(SourceFileName, sizeof SourceFileName, "%s.c", Config->FilePathNoExtension);
-
-    float QScalar = (float)(1ll << FxpShift) / QScalarInvShifted;
-    int32_t LayerCount = NN->LayerCount;
-    int32_t InputCount = NN->InputCount;
-    const char *QScalarInvShiftName = Config->FileFormatC.QScalarInvShiftName;
-    const char *QScalarInvName = Config->FileFormatC.QScalarInvName;
-    const char *QWeightsName = Config->FileFormatC.WeightsName;
-    const char *InfoInputCountName = Config->FileFormatC.InputCountName;
-    const char *InfoLayerCountName = Config->FileFormatC.LayerCountName;
-    const char *InfoNodePerLayerCountName = Config->FileFormatC.NodePerLayerCountName;
-
-    {
-        FILE *HeaderFile = fopen(HeaderFileName, "wb");
-        if (HeaderFile) 
-        {
-            fprintf(HeaderFile, "/* Generated by neuralnet.h */\n");
-            fprintf(HeaderFile, "#ifndef %s\n", Config->FileFormatC.HeaderGuard);
-            fprintf(HeaderFile, "#define %s\n", Config->FileFormatC.HeaderGuard);
-            fprintf(HeaderFile, "\n#include <stdint.h>\n");
-            fprintf(HeaderFile, "\nextern const %s %s;", QScalarInvType, QScalarInvName);
-            fprintf(HeaderFile, "\nextern const %s %s;", IType, QScalarInvShiftName);
-            fprintf(HeaderFile, "\nextern const %s %s;", IType, InfoInputCountName);
-            fprintf(HeaderFile, "\nextern const %s %s;", IType, InfoLayerCountName);
-            fprintf(HeaderFile, "\nextern const %s %s[];", IType, InfoNodePerLayerCountName);
-            fprintf(HeaderFile, "\nextern const %s %s[];", WeightType, QWeightsName);
-            fprintf(HeaderFile, "\n#endif /* %s */", Config->FileFormatC.HeaderGuard);
-        }
-        else
-        {
-            return "Unable to open header file";
-        }
-        fclose(HeaderFile);
-    }
-
-    {
-        FILE *SourceFile = fopen(SourceFileName, "wb");
-        if (SourceFile)
-        {
-            fprintf(SourceFile, "/* Generated by neuralnet.h */\n");
-            fprintf(SourceFile, "\n#include <stdint.h>\n");
-
-            fprintf(SourceFile, "\nconst %s %s = ", QScalarInvType, QScalarInvName);
-            NN__SerializeValueToCSource(SourceFile, Config->QScalarInvType, NNS_NUMERIC_TYPE_FP32, &QScalarInvShifted);
-            fprintf(SourceFile, ";");
-
-            fprintf(SourceFile, "\nconst %s %s = ", IType, QScalarInvShiftName);
-            NN__SerializeValueToCSource(SourceFile, Config->InfoType, NNS_NUMERIC_TYPE_INT32, &FxpShift);
-            fprintf(SourceFile, ";");
-
-            fprintf(SourceFile, "\nconst %s %s = ", IType, InfoInputCountName);
-            NN__SerializeValueToCSource(SourceFile, Config->InfoType, NNS_NUMERIC_TYPE_INT32, &InputCount);
-            fprintf(SourceFile, ";");
-
-            fprintf(SourceFile, "\nconst %s %s = ", IType, InfoLayerCountName);
-            NN__SerializeValueToCSource(SourceFile, Config->InfoType, NNS_NUMERIC_TYPE_INT32, &LayerCount);
-            fprintf(SourceFile, ";");
-
-            fprintf(SourceFile, "\nconst %s %s[] = {", IType, InfoNodePerLayerCountName);
-            for (int i = 0; i < LayerCount; i++)
-            {
-                int32_t NodeCount = NN->Layers[i].OutputCount;
-                NN__SerializeValueToCSource(SourceFile, Config->InfoType, NNS_NUMERIC_TYPE_INT32, &NodeCount);
-                fprintf(SourceFile, ", ");
-            }
-            fprintf(SourceFile, "};");
-
-            fprintf(SourceFile, "\nconst %s %s[] = {", WeightType, QWeightsName);
-            for (int i = 0; i < LayerCount; i++)
-            {
-                neuralnet_layer *Layer = &NN->Layers[i];
-                for (int k = 0; k < Layer->OutputCount * Layer->InputCountB; k++)
-                {
-                    char QWeight[8] = { 0 };
-                    NN__QuantizeValue(Config->WeightType, QWeight, QScalar, Layer->Weights[k]);
-                    NN__SerializeValueToCSource(SourceFile, Config->WeightType, Config->WeightType, QWeight);
-                    fprintf(SourceFile, ", ");
-                }
-            }
-            fprintf(SourceFile, "};\n");
-        }
-        else
-        {
-            return "Unable to open source file";
-        }
-        fclose(SourceFile);
-    }
-
-    return NULL;
-}
-
-/* returns size in bytes */
-static int NN__GetNumericTypeSize(neuralnet_numeric_type Type)
-{
-    switch (Type)
-    {
-    case NNS_NUMERIC_TYPE_INT32: return 4;
-    case NNS_NUMERIC_TYPE_INT16: return 2;
-    case NNS_NUMERIC_TYPE_INT8: return 1;
-    case NNS_NUMERIC_TYPE_FP32: return 4;
-    }
-}
-
-static float NN__GetNumericTypeMax(neuralnet_numeric_type Type)
-{
-    switch (Type)
-    {
-    case NNS_NUMERIC_TYPE_INT32: return INT32_MAX;
-    case NNS_NUMERIC_TYPE_INT16: return INT16_MAX;
-    case NNS_NUMERIC_TYPE_INT8: return INT8_MAX;
-    case NNS_NUMERIC_TYPE_FP32: return FLT_MAX;
-    }
-}
-
-const char *NeuralNet_Serialize(const neuralnet *NN, neuralnet_serialize_config *Config)
+const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Config)
 {
     float QScalarInvShifted = 1.0;
     int FxpShift = 0;
-    if (Config->Flags & NNS_FLAG_ENABLE_QUANTIZATION)
+    if (Config->Flags & NND_FLAG_ENABLE_QUANTIZATION)
     {
         /* scalar quantization */
         neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
@@ -790,9 +546,9 @@ const char *NeuralNet_Serialize(const neuralnet *NN, neuralnet_serialize_config 
         float Alpha = NN__MAX(Min, Max);
 
         /* (2^(p - 1) - 1) / (alpha) */
-        float QScalar = (float)((1llu << (NN__GetNumericTypeSize(Config->WeightType)*8 - 1)) - 1) / Alpha;
+        float QScalar = (float)((1llu << (Nnd_GetTypeSize(Config->WeightType)*8 - 1)) - 1) / Alpha;
 
-        float Ratio = NN__GetNumericTypeMax(Config->QScalarInvType) / NN__GetNumericTypeMax(Config->WeightType);
+        float Ratio = Nnd_GetTypeMax(Config->QScalarInvType) / Nnd_GetTypeMax(Config->WeightType);
         int a = Config->QScalarFxpShift;
         int b = (int)log2f(Ratio * QScalar);
 
@@ -801,15 +557,18 @@ const char *NeuralNet_Serialize(const neuralnet *NN, neuralnet_serialize_config 
         FxpShift = b;
     }
 
-    const char *ErrorMessage = NULL;
-    switch (Config->FileFormat)
-    {
-    case NNS_FILE_FORMAT_C:
-    {
-        ErrorMessage = NN__SerializeToCSource(NN, Config, QScalarInvShifted, FxpShift);
-    } break;
-    }
+    int *NodeCount = NN__ALLOC(NN, NN->LayerCount * sizeof(NodeCount[0]));
+    for (int i = 0; i < NN->LayerCount; i++)
+        NodeCount[i] = NN->Layers[i].OutputCount;
 
+    const char *ErrorMessage = Nnd_SerializeFp32(
+        NN->InputCount,
+        NodeCount, NN->LayerCount, 
+        NN->Weights, NN->WeightCount,
+        Config, QScalarInvShifted, FxpShift
+    );
+
+    NN__FREE(NN, NodeCount);
     return ErrorMessage;
 }
 
