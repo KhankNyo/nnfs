@@ -1,0 +1,56 @@
+all (u)int* are little endian unless stated otherwise
+
+byte offset         | type name, description
+0..3                | char[4] magic, "nndf"
+4..7                | uint32 version:
+                            should be 1
+8..15               | uint64 fl, flags:
+                            NND_FLAG_NONE = 0
+                            NND_FLAG_QUANTIZED = 1 << 0
+16..23              | uint64 wo, offset to weight data from the beginning of file
+24..31              | uint64 ao, offset to arbitrary data from the beginning of file
+32..39              | uint64 wsb, size of weight data in bytes
+40..43              | uint32 wt, weight_type:
+                            NND_TYPE_INT8 = 0
+                            NND_TYPE_INT16 = 1
+                            NND_TYPE_INT32 = 2
+                            NND_TYPE_FP32 = 3
+44..47              | uint32 w_decimal_place:
+                            if wt is (U)INT*:
+                                 decimal place for fixed point weights
+                            else:
+                                 ignore, should be 0
+48..55              | char[8] qscalar_inv_shifted: 
+                            if wt is (U)INT* and (fl & NND_FLAG_QUANTIZED):
+                                 contains the inverse of quantization scalar (1/s) scaled in fixed point:
+                                 (1/s * 2^qscalar_shamt)
+                            else:
+                                 ignore, should be 0
+56..59              | uint32 qscalar_shamt, 
+                            if wt is (U)INT*:
+                                 contains the power of 2 that was used to scale qscalar_inv_shifted
+                            else
+                                 ignore, should be 0
+60..63              | uint32 lc, layer count
+64..71              | uint64 ic, input node count (not including bias, +1 to include bias)
+72..72+lc*8         | uint64[lc] nc, output node count of each layer (not including bias, +1 to include bias)
+72+lc*8..72+lc*8*2  | uint64[lc] wol, offset to the weight matrix of each layer
+                            # NOTE: must use these offsets to retrieve the weights 
+                            # since the weight data might be padded
+ao..wo              | arbitrary data of arbitrary length (can be 0 bytes) depending on version and flags
+wo..wo+wsb          | weight_type wd, weight data,
+                            for each layer, the weight matrix[nrow][ncol] is in this format:
+                                 ---------------------ncol = ic + 1------------------------
+                                | w[0],             w[1],             ... w[ic] 
+                                | w[0 + ic],        w[1 + ic],        ... w[ic + ic] 
+                                | ...
+                            nrow = nc
+                                | ...
+                                | w[0 + (nc-1)*ic], w[1 + (nc-1)*ic], ... w[ic + (nc-1)*ic]
+                                # NOTE: w[ic] is the weight connected to the bias node (input node of value 1.0)
+
+                            the input nodes should be in this format:
+                                [x0, x1, ..., x_(ic-1), 1.0]
+                                # NOTE: 1.0 is the node connected to the weight that acts as a bias
+
+
