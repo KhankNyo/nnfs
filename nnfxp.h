@@ -10,7 +10,6 @@
 #ifndef nnfxp_type
 #  define nnfxp_xtype int32_t
 #  define nnfxp_type int16_t
-#  define nnfxp_utype uint16_t
 #endif /* nnfxp_type */
 
 #ifndef NNFXP_FRACTION_BITS
@@ -106,7 +105,7 @@ void Nnfxp_Print(nnfxp *NN);
 
 #define NNFXP_TYPE_MAX (nnfxp_type)((1llu << (sizeof(nnfxp_type)*8)) - 1)
 #define NNFXP_TYPE_MIN (nnfxp_type)(1llu << (sizeof(nnfxp_type)*8))
-#define NNFXP_FLT_EXTRACT_FRAC(val) ((val) - (float)(nnfxp_utype)(val))
+#define NNFXP_FLT_EXTRACT_FRAC(val) ((val) - (float)(nnfxp_type)(val))
 
 #define NNFXP_EXTRACT_FRAC(fxp) ((fxp) & (NNFXP_ONE - 1))
 #define NNFXP_EXTRACT_INT(fxp) ((fxp) >> NNFXP_FRACTION_BITS)

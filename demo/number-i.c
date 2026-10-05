@@ -16,7 +16,6 @@
 #define NNFXP_FRACTION_BITS 10
 #define nnfxp_xtype int32_t
 #define nnfxp_type int16_t
-#define nnfxp_utype uint16_t
 #define NNFXP_IMPLEMENTATION
 #include "nnfxp.h"
 
