@@ -17,7 +17,7 @@ number.exe:number.c ../*.h
 	gcc $(CCF) -o $@ number.c $(LDF)
 
 number-i.exe:number-i.c ../*.h
-	gcc $(CCF) -o $@ number-i.c $(LDF)
+	gcc $(CCF) -o $@ number-i.c $(LDF) -DCOMPILE_WITH_WEIGHTS
 
 clean:
 	rm *.exe

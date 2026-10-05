@@ -7,10 +7,17 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#ifndef nnfxp_type
+#ifndef nnfxp_xtype
 #  define nnfxp_xtype int32_t
+#endif /* nnfxp_xtype */
+
+#ifndef nnfxp_type
 #  define nnfxp_type int16_t
 #endif /* nnfxp_type */
+
+#ifndef nnfxp_qtype
+#  define nnfxp_qtype int8_t
+#endif /* nnfxp_qtype */
 
 #ifndef NNFXP_FRACTION_BITS
 #  define NNFXP_FRACTION_BITS 8
@@ -26,6 +33,7 @@ typedef struct nnfxp_allocator_param nnfxp_allocator_param;
 typedef struct nnfxp_config nnfxp_config;
 typedef struct nnfxp_backprop_config nnfxp_backprop_config;
 typedef struct nnfxp_param_stats nnfxp_param_stats;
+typedef struct nnfxp_deserialize_config nnfxp_deserialize_config;
 typedef enum
 {
     NNFXP_ALLOCATE,
@@ -64,7 +72,7 @@ struct nnfxp_config
     nnfxp_config_flags Flags;
     int InputCount;
     int LayerCount;
-    int *NodeCountPerLayer;
+    const int *NodeCountPerLayer;
 
     void *AllocatorData;
     nnfxp_allocator_callback AllocatorCallback;
@@ -72,6 +80,14 @@ struct nnfxp_config
     nnfxp_rand_callback RandCallback;
     void *ActivationData;
     nnfxp_activation_callback ActivationCallback;
+};
+
+struct nnfxp_deserialize_config
+{
+    nnfxp_config NnConfig;
+    const nnfxp_qtype *Weights;
+    int QScalarInvShift;
+    nnfxp_type QScalarInv;
 };
 
 struct nnfxp_feedforward_config
@@ -89,9 +105,8 @@ struct nnfxp_backprop_config
 };
 
 
-// TODO:
-// nnfxp Nnfxp_CreateFromNeuralNet(const neuralnet *NN)
 void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config);
+void Nnfxp_Deserialize(nnfxp *NN, const nnfxp_deserialize_config *Config);
 void Nnfxp_Destroy(nnfxp *NN);
 
 void Nnfxp_Randomize(nnfxp *NN);
@@ -139,7 +154,7 @@ struct nnfxp_layer
     int InputCountB;
     int OutputCount;
     /* InputCountB x OutputCount */
-    nnfxp_type *Weights;
+    nnfxp_qtype *Weights;
 
     /* OutputCount */
     nnfxp_xtype *OutputsX;
@@ -150,6 +165,9 @@ struct nnfxp_layer
 
 struct nnfxp
 {
+    int QScalarInvShift;
+    nnfxp_type QScalarInv;
+    bool ReadOnlyWeights;
     int InputCount;
     int InputCountB;
     int LayerCount;
@@ -283,6 +301,16 @@ static nnfxp_xtype Nnfxp__DotProduct(const nnfxp_type *A, const nnfxp_type *B, i
     return Result >> NNFXP_FRACTION_BITS;
 }
 
+static nnfxp_xtype Nnfxp__DotProductq(const nnfxp_qtype *A, const nnfxp_type *B, int Length, nnfxp_type QScalar, int Shift)
+{
+    nnfxp_xtype Result = 0;
+    for (int i = 0; i < Length; i++)
+    {
+        Result += ((nnfxp_xtype)A[i] * B[i] * QScalar) >> (Shift);
+    }
+    return Result;
+}
+
 
 /* NOTE: Out = A*B^T */
 static void Nnfxp__MatMulABT(nnfxp_xtype *Out, const nnfxp_type *A, const nnfxp_type *BT, int RowA, int ColA, int RowBT)
@@ -294,6 +322,22 @@ static void Nnfxp__MatMulABT(nnfxp_xtype *Out, const nnfxp_type *A, const nnfxp_
             const nnfxp_type *RowMatA = A + Ca*RowA;
             const nnfxp_type *ColMatB = BT + Rbt*RowA;
             nnfxp_type Dp = Nnfxp__DotProduct(RowMatA, ColMatB, RowA);
+            Out[Ca*RowBT + Rbt] = Dp;
+        }
+    }
+}
+
+static void Nnfxp__MatMulABTq(
+    nnfxp_xtype *Out, const nnfxp_qtype *A, const nnfxp_type *BT, int RowA, int ColA, int RowBT, 
+    nnfxp_type QScalar, int Shift
+) {
+    for (int Ca = 0; Ca < ColA; Ca++)
+    {
+        for (int Rbt = 0; Rbt < RowBT; Rbt++)
+        {
+            const nnfxp_qtype *RowMatA = A + Ca*RowA;
+            const nnfxp_type *ColMatB = BT + Rbt*RowA;
+            nnfxp_type Dp = Nnfxp__DotProductq(RowMatA, ColMatB, RowA, QScalar, Shift);
             Out[Ca*RowBT + Rbt] = Dp;
         }
     }
@@ -335,41 +379,47 @@ static void Nnfxp__MatTranspose(nnfxp_type *Result, const nnfxp_type *Mat, int R
     }
 }
 
-
-
-
-void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
-{
-    assert(Config->LayerCount >= 1 && "must have at leaast 1 layer (output layer)");
+static void Nnfxp__Init(
+    nnfxp *NN, 
+    nnfxp_config_flags Flags,
+    int LayerCount, int InputCount, 
+    const int32_t *NodeCountPerLayer,
+    void *AllocatorData, nnfxp_allocator_callback AllocatorCallback,
+    void *RandData, nnfxp_rand_callback RandCallback,
+    void *ActivationData, nnfxp_activation_callback ActivationCallback,
+    nnfxp_qtype *Weights
+) {
+    assert(LayerCount >= 1 && "must have at leaast 1 layer (output layer)");
     *NN = (nnfxp) { 
-        .InputCount = Config->InputCount,
-        .InputCountB = Config->InputCount + 1,
-        .LayerCount = Config->LayerCount,
+        .InputCount = InputCount,
+        .InputCountB = InputCount + 1,
+        .LayerCount = LayerCount,
+        .ReadOnlyWeights = Weights != NULL,
     };
-    if (Config->AllocatorCallback != NULL)
+    if (AllocatorCallback != NULL)
     {
-        NN->AllocatorCallback = Config->AllocatorCallback;
-        NN->AllocatorData = Config->AllocatorData;
+        NN->AllocatorCallback = AllocatorCallback;
+        NN->AllocatorData = AllocatorData;
     }
     else
     {
         NN->AllocatorCallback = Nnfxp__DefaultAllocatorCallback;
         NN->AllocatorData = NULL;
     }
-    if (Config->RandCallback != NULL)
+    if (RandCallback != NULL)
     {
-        NN->RandCallback = Config->RandCallback;
-        NN->RandData = Config->RandData;
+        NN->RandCallback = RandCallback;
+        NN->RandData = RandData;
     }
     else
     {
         NN->RandCallback = Nnfxp__DefaultRandCallback;
         NN->RandData = NULL;
     }
-    if (Config->ActivationCallback != NULL)
+    if (ActivationCallback != NULL)
     {
-        NN->ActivationCallback = Config->ActivationCallback;
-        NN->ActivationData = Config->ActivationData;
+        NN->ActivationCallback = ActivationCallback;
+        NN->ActivationData = ActivationData;
     }
     else
     {
@@ -379,23 +429,34 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
 
     /* allocate needed mem */
     {
+        nnfxp_qtype *WeightPtr = Weights;
         NN->Inputs = NNFXP__ALLOC(NN, sizeof(NN->Inputs[0]) * NN->InputCountB);
+        NN->Inputs[NN->InputCountB - 1] = NNFXP_ONE;
         NN->Layers = NNFXP__ALLOC(NN, sizeof(NN->Layers[0]) * NN->LayerCount);
         int InputCount = NN->InputCount;
         int InputCountB = NN->InputCountB;
         int LargestSide = InputCountB;
-        for (int i = 0; i < Config->LayerCount; i++)
+        for (int i = 0; i < LayerCount; i++)
         {
-            int OutputCount = Config->NodeCountPerLayer[i];
+            int OutputCount = NodeCountPerLayer[i];
 
-            NN->Layers[i].Weights = NNFXP__ALLOC(NN, OutputCount*InputCountB*sizeof(NN->Layers[0].Weights[0]));
-            if (!(Config->Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
+            if (Weights)
+            {
+                NN->Layers[i].Weights = Weights;
+                Weights += InputCountB*OutputCount;
+            }
+            else
+            {
+                NN->Layers[i].Weights = NNFXP__ALLOC(NN, OutputCount*InputCountB*sizeof(NN->Layers[0].Weights[0]));
+            }
+            if (!(Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
             {
                 NN->Layers[i].Deltas = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Deltas[0]));
                 NN->Layers[i].DeltasX = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].DeltasX[0]));
             }
             NN->Layers[i].OutputsX = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].OutputsX[0]));
             NN->Layers[i].OutputActivated = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].OutputActivated[0]));
+            NN->Layers[i].OutputActivated[OutputCount] = NNFXP_ONE;
             NN->Layers[i].InputCount = InputCount;
             NN->Layers[i].InputCountB = InputCountB;
             NN->Layers[i].OutputCount = OutputCount;
@@ -404,20 +465,51 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
             InputCountB = OutputCount + 1;
             LargestSide = NNFXP__MAX(OutputCount + 1, LargestSide);
         }
-        if (!(Config->Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
+        if (!(Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
         {
             NN->ScratchMatrix = NNFXP__ALLOC(NN, LargestSide*LargestSide*sizeof(nnfxp_xtype));
         }
     }
+}
 
+
+
+void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
+{
+    Nnfxp__Init(NN, 
+        Config->Flags,
+        Config->LayerCount, Config->InputCount,
+        Config->NodeCountPerLayer,
+        Config->AllocatorData, Config->AllocatorCallback, 
+        Config->RandData, Config->RandCallback,
+        Config->ActivationData, Config->ActivationCallback,
+        NULL
+    );
     Nnfxp_Randomize(NN);
+}
+
+void Nnfxp_Deserialize(nnfxp *NN, const nnfxp_deserialize_config *Config)
+{
+    assert(Config->Weights);
+    Nnfxp__Init(NN, 
+        Config->NnConfig.Flags,
+        Config->NnConfig.LayerCount, Config->NnConfig.InputCount,
+        Config->NnConfig.NodeCountPerLayer,
+        Config->NnConfig.AllocatorData, Config->NnConfig.AllocatorCallback, 
+        Config->NnConfig.RandData, Config->NnConfig.RandCallback,
+        Config->NnConfig.ActivationData, Config->NnConfig.ActivationCallback,
+        (nnfxp_qtype *)Config->Weights
+    );
+    NN->QScalarInvShift = Config->QScalarInvShift;
+    NN->QScalarInv = Config->QScalarInv;
 }
 
 void Nnfxp_Destroy(nnfxp *NN)
 {
     for (int i = 0; i < NN->LayerCount; i++)
     {
-        NNFXP__FREE(NN, NN->Layers[i].Weights);
+        if (!NN->ReadOnlyWeights)
+            NNFXP__FREE(NN, NN->Layers[i].Weights);
         NNFXP__FREE(NN, NN->Layers[i].Deltas);
         NNFXP__FREE(NN, NN->Layers[i].DeltasX);
         NNFXP__FREE(NN, NN->Layers[i].OutputActivated);
@@ -461,9 +553,10 @@ void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config)
         nnfxp_layer *Layer = &NN->Layers[i];
         assert(X[Layer->InputCountB - 1] == NNFXP_ONE);
 
-        Nnfxp__MatMulABT(
+        Nnfxp__MatMulABTq(
             Layer->OutputsX, Layer->Weights, X,
-            Layer->InputCountB, Layer->OutputCount, 1
+            Layer->InputCountB, Layer->OutputCount, 1,
+            NN->QScalarInv, NN->QScalarInvShift
         );
 
         /* NOTE: normalize outputs via activation fn ("squish" Y from -inf..+inf to 0..1) */
@@ -478,6 +571,7 @@ void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config)
 
 void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
 {
+    assert(false && "TODO: backprop with quantized weights");
     /* deltas */
     {
         const nnfxp_layer *Last = NN->Layers + NN->LayerCount - 1;
@@ -532,7 +626,8 @@ void Nnfxp_Backprop(nnfxp *NN, const nnfxp_backprop_config *Config)
         Inputs = Curr->OutputActivated;
         InputCount = Curr->OutputCount;
         InputCountB = Curr->OutputCount + 1;
-    }}
+    }
+}
 
 
 nnfxp_param_stats Nnfxp_GetParamStats(const nnfxp *NN)

@@ -563,11 +563,24 @@ int main(int ArgumentCount, char **Arguments)
         CenteredImage = AllocateMemory(IMAGE_PIXEL_COUNT*IMAGE_CHANNEL_COUNT);
 
         nnfxp NN = { 0 };
+#ifndef COMPILE_WITH_WEIGHTS
         Nnfxp_Create(&NN, &(nnfxp_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
             .LayerCount = MODEL_LAYER_COUNT,
             .NodeCountPerLayer = ModelArchitectureBuzzword,
         });
+#else
+        Nnfxp_Deserialize(&NN, &(nnfxp_deserialize_config) {
+            .NnConfig = {
+                .InputCount = IMAGE_PIXEL_COUNT,
+                .LayerCount = MODEL_LAYER_COUNT,
+                .NodeCountPerLayer = ModelArchitectureBuzzword,
+            },
+            .QScalarInv = WEIGHT_FILE_QSCALAR_INV,
+            .QScalarInvShift = WEIGHT_FILE_QSCALAR_INV_SHIFT,
+            .Weights = WEIGHT_FILE_WEIGHTS,
+        });
+#endif
         neuralnet Fp32NN = NeuralNet_Create(&(neuralnet_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
             .LayerCount = MODEL_LAYER_COUNT,
@@ -688,6 +701,9 @@ int main(int ArgumentCount, char **Arguments)
                 {
                     printf("Serialize successful\n");
                 }
+            } break;
+            case 'd':
+            {
             } break;
 
             case 'T': /* train all from training dataset (int) */
