@@ -1,40 +1,46 @@
 all (u)int* are little endian unless stated otherwise
+enums:
+    type_uint32:
+        NND_TYPE_INT8 = 0
+        NND_TYPE_INT16 = 1
+        NND_TYPE_INT32 = 2
+        NND_TYPE_FP32 = 3
+    flag_uint64:
+        NND_FLAG_NONE = 0
+        NND_FLAG_QUANTIZED = 1 << 0
+
 
 byte offset         | type name, description
 0..3                | char[4] magic, "nndf"
 4..7                | uint32 version:
                             should be 1
-8..15               | uint64 fl, flags:
-                            NND_FLAG_NONE = 0
-                            NND_FLAG_QUANTIZED = 1 << 0
+8..15               | flag_uint64 flags
 16..23              | uint64 wo, offset to weight data from the beginning of file
 24..31              | uint64 ao, offset to arbitrary data from the beginning of file
 32..39              | uint64 wsb, size of weight data in bytes
-40..43              | uint32 wt, weight_type:
-                            NND_TYPE_INT8 = 0
-                            NND_TYPE_INT16 = 1
-                            NND_TYPE_INT32 = 2
-                            NND_TYPE_FP32 = 3
+40..43              | type_uint32 wt, weight_type
 44..47              | uint32 w_decimal_place:
                             if wt is (U)INT*:
                                  decimal place for fixed point weights
                             else:
                                  ignore, should be 0
-48..55              | char[8] qscalar_inv_shifted: 
-                            if wt is (U)INT* and (fl & NND_FLAG_QUANTIZED):
-                                 contains the inverse of quantization scalar (1/s) scaled in fixed point:
-                                 (1/s * 2^qscalar_shamt)
-                            else:
-                                 ignore, should be 0
-56..59              | uint32 qscalar_shamt, 
+48..51              | type_uint32 qscalar_type
+                            # NOTE: should be the same type as the native type used for arithmetic during feedforward
+52..55              | uint32 qscalar_shamt, 
                             if wt is (U)INT*:
                                  contains the power of 2 that was used to scale qscalar_inv_shifted
                             else
                                  ignore, should be 0
-60..63              | uint32 lc, layer count
-64..71              | uint64 ic, input node count (not including bias, +1 to include bias)
-72..72+lc*8         | uint64[lc] nc, output node count of each layer (not including bias, +1 to include bias)
-72+lc*8..72+lc*8*2  | uint64[lc] wol, offset to the weight matrix of each layer
+56..63              | char[8] qscalar_inv_shifted: 
+                            if qscalar_type is (U)INT* and (flags & NND_FLAG_QUANTIZED):
+                                 contains the inverse of quantization scalar (1/s) scaled in fixed point:
+                                 (1/s * 2^qscalar_shamt)
+                            else:
+                                 ignore, should be 0
+64..71              | uint64 lc, layer count
+72..79              | uint64 ic, input node count (not including bias, +1 to include bias)
+80..80+lc*8         | uint64[lc] nc, output node count of each layer (not including bias, +1 to include bias)
+80+lc*8..80+lc*8*2  | uint64[lc] wol, offset to the weight matrix of each layer
                             # NOTE: must use these offsets to retrieve the weights 
                             # since the weight data might be padded
 ao..wo              | arbitrary data of arbitrary length (can be 0 bytes) depending on version and flags
