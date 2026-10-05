@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include <time.h>
 
+#ifdef COMPILE_WITH_WEIGHTS
+#  include "tmp/number-i-weights.h"
+#  include "tmp/number-i-weights.c"
+#endif
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "extern/stb_image_write.h"
 
@@ -13,9 +18,10 @@
 #define IMAGE_IMPLEMENTATION
 #include "extern/image.h"
 
-#define NNFXP_FRACTION_BITS 10
+#define NNFXP_FRACTION_BITS 8
 #define nnfxp_xtype int32_t
 #define nnfxp_type int16_t
+#define nnfxp_qtype int8_t
 #define NNFXP_IMPLEMENTATION
 #include "nnfxp.h"
 
@@ -23,7 +29,18 @@
 #include "neuralnet.h"
 
 
-
+#define WEIGHT_FILE_NAME "number-i-weights"
+#define WEIGHT_FILE_QSCALAR_INV g_QScalarInv
+#define WEIGHT_FILE_QSCALAR_INV_SHIFT g_QScalarInvShift
+#define WEIGHT_FILE_INPUT_COUNT g_InputCount
+#define WEIGHT_FILE_LAYER_COUNT g_LayerCount
+#define WEIGHT_FILE_NODE_PER_LAYER_COUNT g_NodePerLayerCount
+#define WEIGHT_FILE_WEIGHTS g_Weights
+#define STRFY1(x) #x
+#define STRFY(x) STRFY1(x)
+#define COMPRESSED_WEIGHT_TYPE NNS_NUMERIC_TYPE_INT8
+#define ARITH_TYPE NNS_NUMERIC_TYPE_INT16
+#define INFO_TYPE NNS_NUMERIC_TYPE_INT32
 #define IMAGE_WIDTH 28
 #define IMAGE_HEIGHT 28
 #define IMAGE_CHANNEL_COUNT 4
@@ -574,7 +591,8 @@ int main(int ArgumentCount, char **Arguments)
             {
                 printf(
                     "    q    - quit\n"
-                    "    i[n] - predict from given image with the name '%s[n].png',\n"
+                    "    s    - Serialize to '%s.h/c'\n"
+                    "    i[n] - Predict from given image with the name '%s[n].png',\n"
                     "             ex: 'input0.png' for image with number 0, command: 'i0'.\n"
                     "    T    - Train all from training sample '%s' (using int neural network)\n"
                     "    F    - Train all from training sample '%s' (using fp32 neural network)\n"
@@ -590,6 +608,7 @@ int main(int ArgumentCount, char **Arguments)
                     "    L    - Display learning rate\n"
                     "    Y    - Display L2 regularization lambda\n"
                     "    I    - Toggle backpropagation for input prediction (int)\n",
+                    WEIGHT_FILE_NAME,
                     InputFileName,
                     TrainingFileName,
                     TrainingFileName,
@@ -639,6 +658,35 @@ int main(int ArgumentCount, char **Arguments)
                 {
                     InputFlags |= PREDICT_FLAG_ENABLE_BACKPROP;
                     printf("Enabled backprop for input images.\n");
+                }
+            } break;
+            case 's':
+            {
+                const char *ErrMsg = NeuralNet_Serialize(&Fp32NN, &(neuralnet_serialize_config) {
+                    .Flags = NNS_FLAG_ENABLE_QUANTIZATION,
+                    .FileFormat = NNS_FILE_FORMAT_C,
+                    .WeightType = COMPRESSED_WEIGHT_TYPE,
+                    .QScalarInvType = ARITH_TYPE,
+                    .InfoType = INFO_TYPE,
+                    .FilePathNoExtension = WEIGHT_FILE_NAME,
+                    .QScalarFxpShift = NNFXP_FRACTION_BITS,
+                    .FileFormatC = {
+                        .HeaderGuard = "WEIGHTS_H",
+                        .QScalarInvName = STRFY(WEIGHT_FILE_QSCALAR_INV),
+                        .QScalarInvShiftName = STRFY(WEIGHT_FILE_QSCALAR_INV_SHIFT),
+                        .InputCountName = STRFY(WEIGHT_FILE_INPUT_COUNT),
+                        .LayerCountName = STRFY(WEIGHT_FILE_LAYER_COUNT),
+                        .NodePerLayerCountName = STRFY(WEIGHT_FILE_NODE_PER_LAYER_COUNT),
+                        .WeightsName = STRFY(WEIGHT_FILE_WEIGHTS),
+                    },
+                });
+                if (ErrMsg)
+                {
+                    printf("Unable to serialize to '%s.h/c': %s\n", WEIGHT_FILE_NAME, ErrMsg);
+                }
+                else
+                {
+                    printf("Serialize successful\n");
                 }
             } break;
 
