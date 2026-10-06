@@ -557,7 +557,7 @@ const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Confi
         FxpShift = b;
     }
 
-    int *NodeCount = NN__ALLOC(NN, NN->LayerCount * sizeof(NodeCount[0]));
+    uint64_t *NodeCount = NN__ALLOC(NN, NN->LayerCount * sizeof(NodeCount[0]));
     for (int i = 0; i < NN->LayerCount; i++)
         NodeCount[i] = NN->Layers[i].OutputCount;
 

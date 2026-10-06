@@ -124,6 +124,26 @@ static void CopyNeuralNetToNnfxp(nnfxp *Nnfxp, neuralnet *NN)
 }
 
 
+static void Serialize(neuralnet *Fp32NN, const char *FileName, nnd_file_format Format, nnd_file_format_config *FConfig)
+{
+    const char *ErrMsg = NeuralNet_Serialize(Fp32NN, &(nnd_serialize_config) {
+        .Flags = NND_FLAG_ENABLE_QUANTIZATION,
+        .FileFormat = Format,
+        .WeightType = COMPRESSED_WEIGHT_TYPE,
+        .QScalarInvType = ARITH_TYPE,
+        .FilePathNoExtension = WEIGHT_FILE_NAME,
+        .QScalarFxpShift = NNFXP_FRACTION_BITS,
+        .FileFormatConfig = *FConfig,
+    });
+    if (ErrMsg)
+    {
+        printf("Unable to serialize to '%s.h/c': %s\n", FileName, ErrMsg);
+    }
+    else
+    {
+        printf("Serialize successful\n");
+    }
+}
 
 static data LoadTrainingCSV(const char *FileName, int SampleCount, int ImageWidth, int ImageHeight)
 {
@@ -266,15 +286,8 @@ static bool Predict(nnfxp *NN, predict_params *Params)
 
     memset(g_FxpNNExpectedOutputs, 0, sizeof g_FxpNNExpectedOutputs);
     g_FxpNNExpectedOutputs[Params->Label] = NNFXP(1.0);
-    if (Params->Flags & PREDICT_FLAG_ENABLE_BACKPROP)
-    {
-        Nnfxp_Backprop(NN, &(nnfxp_backprop_config) {
-            .ExpectedOutputCount = DIGIT_COUNT,
-            .ExpectedOutputs = g_FxpNNExpectedOutputs,
-            .LearningRate = NNFXP(Params->LearningRate),
-            .L2Lambda = NNFXP(Params->L2Lambda),
-        });
-    }
+    assert(!(Params->Flags & PREDICT_FLAG_ENABLE_BACKPROP) && "Cannot train int neural network directly");
+
     if (Params->OutLoss)
     {
         *Params->OutLoss = NNFXP_FLT(Nnfxp_CalcLoss(NN, 
@@ -600,9 +613,10 @@ int main(int ArgumentCount, char **Arguments)
                 printf(
                     "    q    - quit\n"
                     "    s    - Serialize to '%s.h/c'\n"
+                    "    S    - Serialize to '%s.nnd'\n"
+                    "    D    - Deserialize from '%s.nnd'\n"
                     "    i[n] - Predict from given image with the name '%s[n].png',\n"
                     "             ex: 'input0.png' for image with number 0, command: 'i0'.\n"
-                    "    T    - Train all from training sample '%s' (using int neural network)\n"
                     "    F    - Train all from training sample '%s' (using fp32 neural network)\n"
                     "    C    - Copy fp32 neural network to int\n"
                     "    p    - Predict a random sample from test suite '%s' (int)\n"
@@ -617,8 +631,9 @@ int main(int ArgumentCount, char **Arguments)
                     "    Y    - Display L2 regularization lambda\n"
                     "    I    - Toggle backpropagation for input prediction (int)\n",
                     WEIGHT_FILE_NAME,
+                    WEIGHT_FILE_NAME,
+                    WEIGHT_FILE_NAME,
                     InputFileName,
-                    TrainingFileName,
                     TrainingFileName,
                     TestingFileName,
                     TestingFileName
@@ -670,69 +685,31 @@ int main(int ArgumentCount, char **Arguments)
             } break;
             case 's':
             {
-                const char *ErrMsg = NeuralNet_Serialize(&Fp32NN, &(nnd_serialize_config) {
-                    .Flags = NND_FLAG_ENABLE_QUANTIZATION,
-                    .FileFormat = NND_FILE_FORMAT_C,
-                    .WeightType = COMPRESSED_WEIGHT_TYPE,
-                    .QScalarInvType = ARITH_TYPE,
-                    .InfoType = INFO_TYPE,
-                    .FilePathNoExtension = WEIGHT_FILE_NAME,
-                    .QScalarFxpShift = NNFXP_FRACTION_BITS,
-                    .FileFormatC = {
+                Serialize(
+                    &Fp32NN, 
+                    WEIGHT_FILE_NAME,
+                    NND_FILE_FORMAT_C,
+                    &(nnd_file_format_config) { .C = {
+                        .InfoType = INFO_TYPE,
                         .HeaderGuard = "WEIGHTS_H",
                         .VariableName = STRFY(WEIGHT_FILE_VARIABLE_NAME),
-                    },
-                });
-                if (ErrMsg)
-                {
-                    printf("Unable to serialize to '%s.h/c': %s\n", WEIGHT_FILE_NAME, ErrMsg);
-                }
-                else
-                {
-                    printf("Serialize successful\n");
-                }
+                    }}
+                );
             } break;
-            case 'd':
+            case 'S':
             {
+                Serialize(
+                    &Fp32NN, 
+                    WEIGHT_FILE_NAME,
+                    NND_FILE_FORMAT_NND,
+                    &(nnd_file_format_config) { 0 }
+                );
             } break;
-
-            case 'T': /* train all from training dataset (int) */
+            case 'D':
             {
-                int TruePositiveCount = 0;
-                double Start = clock();
-                {
-                    for (int i = 0; i < TrainingSampleCount; i++)
-                    {
-                        const uint8_t *Sample = TrainingData.Samples + i*IMAGE_PIXEL_COUNT;
-                        int Digit = TrainingData.Labels[i];
-                        printf("\rTraining in progress: %d/%d, precision: %4.2f%% (%d/%d)", 
-                            i, TrainingSampleCount, (float)TruePositiveCount / (i + 1) * 100, TruePositiveCount, TrainingSampleCount
-                        );
-                        bool Correct = Predict(&NN, &(predict_params) {
-                            .Flags = PREDICT_FLAG_ENABLE_BACKPROP,
-                            .LearningRate = (LearningRate), 
-                            .Image = Sample,
-                            .Label = Digit, 
-                            .L2Lambda = (L2Lambda / TrainingSampleCount),
-
-                            .OutLoss = &TrainingLoss[i],
-                        });
-                        TruePositiveCount += Correct;
-                    }
-                }
-                double Dt = (clock() - Start) / CLOCKS_PER_SEC;
-                printf("\ntime: %fs\n", Dt);
-
-                PrintVerdict(&NN, &(verdict_config) {
-                    .TruePositiveCount = TruePositiveCount,
-                    .FalseNegativeThreshold = (FalseNegativeThreshold),
-                    .TruePositiveThreshold = (TruePositiveThreshold),
-
-                    .SampleCount = TrainingSampleCount,
-                    .Labels = TrainingData.Labels,
-                    .Loss = TrainingLoss,
-                });
+                // TODO:
             } break;
+
             case 'F': /* train all from training dataset (fp32) */
             {
                 int TruePositiveCount = 0;

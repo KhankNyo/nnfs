@@ -8,6 +8,7 @@ enums:
     flag_uint64:
         NND_FLAG_NONE = 0
         NND_FLAG_QUANTIZED = 1 << 0
+        NND_FLAG_SPARSE_WEIGHTS = 1 << 1
 
 
 byte offset         | type name, description
@@ -15,12 +16,13 @@ byte offset         | type name, description
 4..7                | uint32 version:
                             should be 1
 8..15               | flag_uint64 flags
-24..31              | uint64 ao, offset to arbitrary data from the beginning of file
+24..27              | uint32 ao, offset to arbitrary data from the beginning of file
+28..31              | uint32 as, size of arbitrary data in bytes
 16..23              | uint64 wo, offset to weight data from the beginning of file
 32..39              | uint64 wsb, size of weight data in bytes
 40..43              | type_uint32 wt, weight_type
 44..47              | uint32 w_decimal_place:
-                            if wt is (U)INT*:
+                            if wt is (U)INT* and !(flags & NND_FLAG_QUANTIZED):
                                  decimal place for fixed point weights
                             else:
                                  ignore, should be 0
@@ -37,12 +39,15 @@ byte offset         | type name, description
                                  (1/s * 2^qscalar_shamt)
                             else:
                                  ignore, should be 0
-64..71              | uint64 lc, layer count
-72..79              | uint64 ic, input node count (not including bias, +1 to include bias)
-80..80+lc*8         | uint64[lc] nc, output node count of each layer (not including bias, +1 to include bias)
-80+lc*8..80+lc*8*2  | uint64[lc] wol, offset to the weight matrix of each layer
-                            # NOTE: must use these offsets to retrieve the weights 
-                            # since the weight data might be padded
+64..67              | uint32 lc, layer count
+68..71              | uint32 ic, input node count (not including bias, +1 to include bias)
+72..72+lc*8         | uint64[lc] nc, output node count of each layer (not including bias, +1 to include bias)
+72+lc*8..72+lc*8*2  | uint64[lc] wol, 
+                            if flags & NND_FLAG_SPARSE_WEIGHTS
+                                it is the offset to the weight matrix of each layer
+                                # NOTE: must use these offsets to retrieve the weights for each layer
+                            else
+                                this field does not exist
 ao..wo              | arbitrary data of arbitrary length (can be 0 bytes) depending on version and flags
 wo..wo+wsb          | weight_type wd, weight data,
                             for each layer, the weight matrix[nrow][ncol] is in this format:
