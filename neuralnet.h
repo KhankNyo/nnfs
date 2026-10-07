@@ -541,49 +541,6 @@ float NeuralNet_GetQuantizationScalar(const neuralnet *NN, float QuantizedTypeMa
     return QScalar;
 }
 
-#if 0
-const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Config)
-{
-    float QScalarInvShifted = 1.0;
-    int FxpShift = 0;
-    if (Config->Flags & NND_FLAG_ENABLE_QUANTIZATION)
-    {
-        /* scalar quantization */
-        neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
-        float Min = NN__MIN(Stats.WeightMin, Stats.BiasMin);
-        float Max = NN__MAX(Stats.WeightMax, Stats.BiasMax);
-        Min = fabs(Min);
-        Max = fabs(Max);
-        float Alpha = NN__MAX(Min, Max);
-
-        /* (2^(p - 1) - 1) / (alpha) */
-        float QScalar = (float)((1llu << (Nnd_GetTypeSize(Config->WeightType)*8 - 1)) - 1) / Alpha;
-
-        float Ratio = Nnd_GetTypeMax(Config->QScalarInvType) / Nnd_GetTypeMax(Config->WeightType);
-        int a = Config->QScalarFxpShift;
-        int b = (int)log2f(Ratio * QScalar);
-
-        /* 2^(a + b) / (s * 2^a) */
-        QScalarInvShifted = (float)(1ll << (a + b)) / (QScalar * (1ll << a));
-        FxpShift = b;
-    }
-
-    uint64_t *NodeCount = NN__ALLOC(NN, NN->LayerCount * sizeof(NodeCount[0]));
-    for (int i = 0; i < NN->LayerCount; i++)
-        NodeCount[i] = NN->Layers[i].OutputCount;
-
-    const char *ErrorMessage = Nnd_SerializeFp32(
-        NN->InputCount,
-        NodeCount, NN->LayerCount, 
-        NN->Weights, NN->WeightCount,
-        Config, QScalarInvShifted, FxpShift
-    );
-
-    NN__FREE(NN, NodeCount);
-    return ErrorMessage;
-}
-#endif
-
 
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param)
 {

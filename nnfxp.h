@@ -2,7 +2,6 @@
 #define NNFXP_H
 
 /* this can be used independently from neuralnet.h */
-/* TODO: multiply-accumulate in wider type */
 
 #include <stdbool.h>
 #include <stdint.h>

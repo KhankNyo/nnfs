@@ -76,6 +76,7 @@ const char *Nnd_SerializeFp32(
 int Nnd_GetTypeSize(nnd_type Type); /* returns size in bytes */
 float Nnd_GetTypeMax(nnd_type Type);
 
+
 #endif /* NND_H */
 
 

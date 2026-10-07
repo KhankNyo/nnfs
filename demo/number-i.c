@@ -19,7 +19,7 @@
 #include "extern/image.h"
 
 #define NNFXP_FRACTION_BITS 8
-#define nnfxp_xtype int32_t
+#define nnfxp_xtype int16_t
 #define nnfxp_type int16_t
 #define nnfxp_qtype int8_t
 #define NNFXP_IMPLEMENTATION
@@ -141,18 +141,6 @@ static void Serialize(neuralnet *Fp32NN, const char *FileName, nnd_file_format F
             .FileFormatConfig = *FConfig,
         }
     );
-
-#if 0
-    const char *ErrMsg = NeuralNet_Serialize(Fp32NN, &(nnd_serialize_config) {
-        .Flags = NND_FLAG_ENABLE_QUANTIZATION,
-        .FileFormat = Format,
-        .WeightType = COMPRESSED_WEIGHT_TYPE,
-        .QScalarInvType = ARITH_TYPE,
-        .FilePathNoExtension = MODEL_FILE_NAME,
-        .QScalarFxpShift = NNFXP_FRACTION_BITS,
-        .FileFormatConfig = *FConfig,
-    });
-#endif
     if (ErrMsg)
     {
         printf("Unable to serialize to '%s.h/c': %s\n", FileName, ErrMsg);
