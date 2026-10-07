@@ -716,7 +716,12 @@ int main(int ArgumentCount, char **Arguments)
             } break;
             case 'D':
             {
-                // TODO:
+                Nnd_DeserializeToNnfxp(
+                    &NN, 
+                    &(nnd_deserialize_config) {
+                        .FilePath = MODEL_FILE_NAME".nnd",
+                    }
+                );
             } break;
 
             case 'F': /* train all from training dataset (fp32) */

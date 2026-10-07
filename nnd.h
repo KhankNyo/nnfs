@@ -12,6 +12,7 @@
 typedef struct nnd_serialize_config nnd_serialize_config;
 typedef struct nnd_file_header nnd_file_header;
 typedef union nnd_file_format_config nnd_file_format_config;
+typedef struct nnd_deserialize_config nnd_deserialize_config;
 typedef enum 
 {
     NND_FILE_FORMAT_C = 0,
@@ -51,6 +52,26 @@ struct nnd_serialize_config
     } FileFormatConfig;
 };
 
+struct nnd_deserialize_config
+{
+    const char *FilePath;
+};
+
+
+/* returns NULL if no error, otherwise return static string describing the error (DO NOT FREE) */
+const char *Nnd_SerializeFp32(
+    const neuralnet *NN, 
+    const nnd_serialize_config *Config
+);
+/* returns NULL if no error, otherwise return static string describing the error (DO NOT FREE) */
+const char *Nnd_DeserializeToNnfxp(
+    nnfxp *Nnfxp,
+    const nnd_deserialize_config *Config
+);
+int Nnd_GetTypeSize(nnd_type Type); /* returns size in bytes */
+float Nnd_GetTypeMax(nnd_type Type);
+
+
 struct nnd_file_header
 {
     char Magic[4];
@@ -68,13 +89,6 @@ struct nnd_file_header
     uint32_t Lc;
     uint32_t Ic;
 };
-
-const char *Nnd_SerializeFp32(
-    neuralnet *NN, 
-    nnd_serialize_config *Config
-);
-int Nnd_GetTypeSize(nnd_type Type); /* returns size in bytes */
-float Nnd_GetTypeMax(nnd_type Type);
 
 
 #endif /* NND_H */
@@ -285,8 +299,8 @@ static void Nnd__FWriteLE(FILE *Dst, const void *Value, nnd_type Type)
 
 
 static const char *Nnd__SerializeFp32ToCSource(
-    neuralnet *NN,
-    nnd_serialize_config *Config, 
+    const neuralnet *NN,
+    const nnd_serialize_config *Config, 
     float Scalar, float ScalarInvShifted, int32_t ScalarShift
 ) {
     const nnd_file_format_config *FConfig = &Config->FileFormatConfig;
@@ -371,8 +385,8 @@ static const char *Nnd__SerializeFp32ToCSource(
 }
 
 static const char *Nnd__SerializeFp32ToNnd(
-    neuralnet *NN,
-    nnd_serialize_config *Config,
+    const neuralnet *NN,
+    const nnd_serialize_config *Config,
     float Scalar, float ScalarInvShifted, int32_t ScalarShift
 ) {
     char FileName[256];
@@ -458,8 +472,8 @@ float Nnd_GetTypeMax(nnd_type Type)
 }
 
 const char *Nnd_SerializeFp32(
-    neuralnet *NN, 
-    nnd_serialize_config *Config
+    const neuralnet *NN,
+    const nnd_serialize_config *Config
 ) {
     const char *ErrorMessage = NULL;
     float Scalar = 0;
@@ -492,6 +506,14 @@ const char *Nnd_SerializeFp32(
     } break;
     }
     return ErrorMessage;
+}
+
+const char *Nnd_DeserializeToNnfxp(
+    nnfxp *NN,
+    const nnd_deserialize_config *Config
+) {
+    (void)NN, (void)Config;
+    assert(false && "TODO");
 }
 
 #endif
