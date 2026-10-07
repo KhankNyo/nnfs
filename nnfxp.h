@@ -6,10 +6,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#ifndef nnfxp_xtype
-#  define nnfxp_xtype int32_t
-#endif /* nnfxp_xtype */
-
 #ifndef nnfxp_type
 #  define nnfxp_type int16_t
 #endif /* nnfxp_type */
@@ -129,7 +125,7 @@ void Nnfxp_Print(nnfxp *NN);
 #define NNFXP_ADDC(x, constant) NNFXP_ADD(x, NNFXP(constant)) 
 #define NNFXP_SUBC(x, constant) NNFXP_SUB(x, NNFXP(constant))
 
-#define NNFXP_MUL(a, b) (((nnfxp_xtype)(a) * (b)) >> (NNFXP_FRACTION_BITS))
+#define NNFXP_MUL(a, b) (((nnfxp_type)(a) * (b)) >> (NNFXP_FRACTION_BITS))
 #define NNFXP_DIV(a, b) (((a) / (b)) << NNFXP_FRACTION_BITS)
 #define NNFXP_DIVL(a, b) ((((a) << NNFXP_FRACTION_BITS) / (b)))
 #define NNFXP_DIVR(a, b) (((a) / ((b) >> NNFXP_FRACTION_BITS)))
@@ -150,7 +146,7 @@ struct nnfxp_layer
     nnfxp_qtype *Weights;
 
     /* OutputCount */
-    nnfxp_xtype *OutputsX;
+    nnfxp_type *OutputsX;
     nnfxp_type *OutputActivated;
 };
 
@@ -280,12 +276,12 @@ static nnfxp_type Nnfxp__Sigmoid(void *Data, nnfxp_type X)
     return 0;
 }
 
-static nnfxp_xtype Nnfxp__DotProductq(const nnfxp_qtype *A, const nnfxp_type *B, int Length, nnfxp_type QScalar, int Shift)
+static nnfxp_type Nnfxp__DotProductq(const nnfxp_qtype *A, const nnfxp_type *B, int Length, nnfxp_type QScalar, int Shift)
 {
-    nnfxp_xtype Result = 0;
+    nnfxp_type Result = 0;
     for (int i = 0; i < Length; i++)
     {
-        Result += ((nnfxp_xtype)A[i] * B[i] * QScalar) >> (Shift);
+        Result += ((nnfxp_type)A[i] * B[i] * QScalar) >> (Shift);
     }
     return Result;
 }
@@ -293,7 +289,7 @@ static nnfxp_xtype Nnfxp__DotProductq(const nnfxp_qtype *A, const nnfxp_type *B,
 
 /* NOTE: Out = A*B^T */
 static void Nnfxp__MatMulABTq(
-    nnfxp_xtype *Out, const nnfxp_qtype *A, const nnfxp_type *BT, int RowA, int ColA, int RowBT, 
+    nnfxp_type *Out, const nnfxp_qtype *A, const nnfxp_type *BT, int RowA, int ColA, int RowBT, 
     nnfxp_type QScalar, int Shift
 ) {
     for (int Ca = 0; Ca < ColA; Ca++)
@@ -572,10 +568,10 @@ nnfxp_type Nnfxp_CalcLoss(nnfxp *NN, const nnfxp_type *ExpectedOutputs, int Outp
         Sum += NNFXP_MUL(Tmp, Tmp);
     }
 
-    nnfxp_xtype L2 = 0;
+    nnfxp_type L2 = 0;
     for (int i = 0; i < NN->LayerCount; i++)
     {
-        nnfxp_xtype Sum = 0;
+        nnfxp_type Sum = 0;
         nnfxp_layer *Layer = NN->Layers + i;
         for (int h = 0; h < Layer->OutputCount; h++)
         {

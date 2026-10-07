@@ -19,7 +19,6 @@
 #include "extern/image.h"
 
 #define NNFXP_FRACTION_BITS 8
-#define nnfxp_xtype int16_t
 #define nnfxp_type int16_t
 #define nnfxp_qtype int8_t
 #define NNFXP_IMPLEMENTATION
