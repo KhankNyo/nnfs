@@ -18,9 +18,6 @@
 #define IMAGE_IMPLEMENTATION
 #include "extern/image.h"
 
-#define NNFXP_FRACTION_BITS 8
-#define nnfxp_type int16_t
-#define nnfxp_qtype int8_t
 #define NNFXP_IMPLEMENTATION
 #include "nnfxp.h"
 
@@ -31,6 +28,10 @@
 #include "nnd.h"
 
 
+#define NNFXP_FRACTION_BITS 8
+#define NNFXP_TYPE_COMBO NNFXP_TYPE_16x8q
+#define nnfxp_dqtype int16_t
+#define nnfxp_qtype int8_t
 #define MODEL_FILE_NAME "number-i-weights"
 #define MODEL g_Model
 #define STRFY1(x) #x
@@ -96,7 +97,7 @@ typedef struct
 
 static float g_FpNNInputs[IMAGE_PIXEL_COUNT];
 static float g_FpNNExpectedOutputs[DIGIT_COUNT];
-static nnfxp_type g_FxpNNInputs[IMAGE_PIXEL_COUNT];
+static nnfxp_dqtype g_FxpNNInputs[IMAGE_PIXEL_COUNT];
 static nnfxp_type g_FxpNNExpectedOutputs[DIGIT_COUNT];
 
 
@@ -107,22 +108,23 @@ static void *AllocateMemory(size_t ByteCount)
     return Ptr;
 }
 
-static void CopyNeuralNetToNnfxp(nnfxp *Nnfxp, neuralnet *NN)
+static void CopyNeuralNetToNnfxp(nnfxp *Nnfxp, const nnfxp_config *Config, const neuralnet *NN)
 {
     assert(NN->LayerCount == Nnfxp->LayerCount);
-    for (int i = 0; i < NN->LayerCount; i++)
-    {
-        neuralnet_layer *NNLayer = NN->Layers + i;
-        nnfxp_layer *NNFxpLayer = Nnfxp->Layers + i;
-        assert(NNLayer->InputCount == NNFxpLayer->InputCount);
-        assert(NNLayer->InputCountB == NNFxpLayer->InputCountB);
-        assert(NNLayer->OutputCount == NNFxpLayer->OutputCount);
+    Nnfxp_Destroy(Nnfxp);
+    memset(Nnfxp, 0, sizeof *Nnfxp);
 
-        for (int k = 0; k < NNLayer->OutputCount * NNLayer->InputCountB; k++)
-        {
-            NNFxpLayer->Weights[k] = NNFXP(NNLayer->Weights[k]);
+    float QScalar = NeuralNet_GetQuantizationScalar(NN, INT8_MAX);
+    Nnfxp_CreateFromFp32Model(
+        Nnfxp, 
+        Config,
+        &(nnfxp_model_config) {
+            .Weights = NN->Weights,
+            .WeightCount = NN->WeightCount,
+            .QScalarInv = (1 << 12) / QScalar,
+            .QScalarInvShift = 12,
         }
-    }
+    );
 }
 
 
@@ -242,7 +244,7 @@ static void CenterImage(uint8_t *Dst, const uint8_t *Src, int Width, int Height)
     }
 }
 
-static int FindMaxIndex(const nnfxp_type *Data, int Count)
+static int FindMaxIndex(const nnfxp_dqtype *Data, int Count)
 {
     ASSERTF(Count, "Invalid count: %d\n", Count);
     int MaxIndex = 0;
@@ -272,7 +274,7 @@ static bool Predict(nnfxp *NN, predict_params *Params)
     {
         for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
         {
-            g_FxpNNInputs[i] = NNFXP(Params->Image[i*4] * (1.0 / 255.0));
+            g_FxpNNInputs[i] = NNFXP(Params->Image[i*4] * (1.0 / 255.0), NN->FxpDecimal);
         }
     }
     else
@@ -280,7 +282,7 @@ static bool Predict(nnfxp *NN, predict_params *Params)
         /* straightforward for the compiler to do simd optimization, can't be bothered */
         for (int i = 0; i < IMAGE_PIXEL_COUNT; i++)
         {
-            g_FxpNNInputs[i] = NNFXP(Params->Image[i] * (1.0 / 255.0)); /* normalizing color channel from 0..255 to 0..1 */
+            g_FxpNNInputs[i] = NNFXP(Params->Image[i] * (1.0 / 255.0), NN->FxpDecimal); /* normalizing color channel from 0..255 to 0..1 */
         }
     }
 
@@ -290,7 +292,7 @@ static bool Predict(nnfxp *NN, predict_params *Params)
     });
 
     memset(g_FxpNNExpectedOutputs, 0, sizeof g_FxpNNExpectedOutputs);
-    g_FxpNNExpectedOutputs[Params->Label] = NNFXP(1.0);
+    g_FxpNNExpectedOutputs[Params->Label] = NNFXP(1.0, NN->FxpDecimal);
     assert(!(Params->Flags & PREDICT_FLAG_ENABLE_BACKPROP) && "Cannot train int neural network directly");
 
     if (Params->OutLoss)
@@ -298,38 +300,38 @@ static bool Predict(nnfxp *NN, predict_params *Params)
         *Params->OutLoss = NNFXP_FLT(Nnfxp_CalcLoss(NN, 
             g_FxpNNExpectedOutputs, 
             DIGIT_COUNT, 
-            NNFXP(Params->L2Lambda)
-        ));
+            NNFXP(Params->L2Lambda, NN->FxpDecimal)
+        ), NN->FxpDecimal);
     }
 
-    const nnfxp_type *Outputs = Nnfxp_GetOutputs(NN);
+    const nnfxp_dqtype *Outputs = Nnfxp_GetOutputs(NN);
     bool IsCorrect = FindMaxIndex(Outputs, DIGIT_COUNT) == Params->Label;
     return IsCorrect;
 }
 
 static void PrintVerdict(nnfxp *NN, const verdict_config *Config)
 {
-    const nnfxp_type *Output = Nnfxp_GetOutputs(NN);
+    const void *Output = Nnfxp_GetOutputs(NN);
 
     if (Config->SampleCount == 1)
     {
         printf("Best guess: %d\n", FindMaxIndex(Output, DIGIT_COUNT));
         printf("Expected:    [");
         for (int i = 0; i < DIGIT_COUNT; i++)
-            printf("%4.3f ", NNFXP_FLT(g_FxpNNExpectedOutputs[i]));
+            printf("%4.3f ", NNFXP_FLT(g_FxpNNExpectedOutputs[i], NN->FxpDecimal));
         printf("]\n");
 
         printf("Digits 0..9: [");
         for (int i = 0; i < DIGIT_COUNT; i++)
-            printf("%4.3f ", NNFXP_FLT(Output[i]));
+            printf("%4.3f ", NNFXP_FLT(Nnfxp_GetOutput(NN, i), NN->FxpDecimal));
         printf("]\n");
         printf("Correctness: [");
         for (int i = 0; i < DIGIT_COUNT; i++)
         {
             if (i == Config->Labels[Config->SampleCount - 1])
-                printf("  %c   ", NNFXP_FLT(Output[i]) > Config->TruePositiveThreshold? 'o' : 'X');
+                printf("  %c   ", NNFXP_FLT(Nnfxp_GetOutput(NN, i), NN->FxpDecimal) > Config->TruePositiveThreshold? 'o' : 'X');
             else
-                printf("  %c   ", NNFXP_FLT(Output[i]) < Config->FalseNegativeThreshold? '_' : 'x');
+                printf("  %c   ", NNFXP_FLT(Nnfxp_GetOutput(NN, i), NN->FxpDecimal) < Config->FalseNegativeThreshold? '_' : 'x');
         }
         printf("]\n");
     }
@@ -340,10 +342,10 @@ static void PrintVerdict(nnfxp *NN, const verdict_config *Config)
     {
         nnfxp_param_stats Stats = Nnfxp_GetParamStats(NN);
         printf("wmin: %f, wmax: %f, bmin: %f, bmax: %f\n", 
-            NNFXP_FLT(Stats.WeightMin),
-            NNFXP_FLT(Stats.WeightMax),
-            NNFXP_FLT(Stats.BiasMin),
-            NNFXP_FLT(Stats.BiasMax)
+            NNFXP_FLT(Stats.WeightMin, NN->FxpDecimal),
+            NNFXP_FLT(Stats.WeightMax, NN->FxpDecimal),
+            NNFXP_FLT(Stats.BiasMin, NN->FxpDecimal),
+            NNFXP_FLT(Stats.BiasMax, NN->FxpDecimal)
         );
     }
 
@@ -575,33 +577,41 @@ int main(int ArgumentCount, char **Arguments)
         TestingLoss = AllocateMemory(TestingSampleCount * sizeof(TestingLoss[0]));
         CenteredImage = AllocateMemory(IMAGE_PIXEL_COUNT*IMAGE_CHANNEL_COUNT);
 
-        nnfxp NN = { 0 };
-#ifndef COMPILE_WITH_WEIGHTS
-        Nnfxp_Create(&NN, &(nnfxp_config) {
+        nnfxp_config Config = {
             .InputCount = IMAGE_PIXEL_COUNT,
             .LayerCount = MODEL_LAYER_COUNT,
+            .FxpDecimal = NNFXP_FRACTION_BITS,
+            .TypeCombo = NNFXP_TYPE_COMBO,
             .NodeCountPerLayer = ModelArchitectureBuzzword,
-        });
-#else
-        Nnfxp_CreateFromModel(
-            &NN, 
-            &(nnfxp_config) {
-                .InputCount = MODEL.InputCount,
-                .LayerCount = MODEL.LayerCount,
-                .NodeCountPerLayer = MODEL.NodeCountPerLayer,
-            },
-            &(nnfxp_model_config) {
-                .QScalarInv = MODEL.QScalarInvShifted,
-                .QScalarInvShift = MODEL.QScalarInvShamt,
-                .Weights = MODEL.Weights,
-            }
-        );
-#endif
+        };
+        nnfxp NN = { 0 };
         neuralnet Fp32NN = NeuralNet_Create(&(neuralnet_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
             .LayerCount = MODEL_LAYER_COUNT,
             .NodeCountPerLayer = ModelArchitectureBuzzword,
         });
+#ifndef COMPILE_WITH_WEIGHTS
+        Nnfxp_CreateFromFp32Model(
+            &NN, 
+            &Config,
+            &(nnfxp_model_config) {
+                .Weights = Fp32NN.Weights,
+                .WeightCount = Fp32NN.WeightCount,
+            }
+        );
+#else
+        Nnfxp_CreateFromIntModel(
+            &NN, 
+            &Config,
+            &(nnfxp_model_config) {
+                .Flags = NNFXP_MODEL_FLAG_DONT_COPY_WEIGHTS,
+                .QScalarInv = MODEL.QScalarInvShifted,
+                .QScalarInvShift = MODEL.QScalarInvShamt,
+                .Weights = MODEL.Weights,
+                .WeightCount = MODEL.WeightCount,
+            }
+        );
+#endif
         printf("try 'h' for help\n");
         while (1)
         {
@@ -629,7 +639,6 @@ int main(int ArgumentCount, char **Arguments)
                     "    C    - Copy fp32 neural network to int\n"
                     "    p    - Predict a random sample from test suite '%s' (int)\n"
                     "    P    - Predict all from test suite '%s' (int)\n"
-                    "    r    - Reset all weights (int)\n"
                     "    R    - Reset all weights (fp32)\n"
                     "    l[f] - Set learning rate\n"
                     "             ex: 'l0.1'\n"
@@ -651,15 +660,9 @@ int main(int ArgumentCount, char **Arguments)
             case 'q':
                 goto Out;
 
-            case 'r':
-            {
-                Nnfxp_Randomize(&NN);
-                printf("Neural network randomized.\n");
-            } break;
-
             case 'C':
             {
-                CopyNeuralNetToNnfxp(&NN, &Fp32NN);
+                CopyNeuralNetToNnfxp(&NN, &Config, &Fp32NN);
                 printf("Neural network copied");
             } break;
             case 'L':

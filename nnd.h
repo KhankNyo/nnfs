@@ -109,7 +109,8 @@ struct nnd_file_header
         "   %s QScalarInvShamt;\n"\
         "   const %s *NodeCountPerLayer;\n"\
         "   const %s *Weights;\n"\
-        "} ", itype, itype, qtype, itype, itype, wtype\
+        "   %s WeightCount;\n"\
+        "} ", itype, itype, qtype, itype, itype, wtype, itype\
         )
 
 #include <stdio.h>
@@ -117,6 +118,7 @@ struct nnd_file_header
 #include <stdbool.h>
 #include <string.h>
 #include <float.h>
+#include <inttypes.h>
 
 
 static int32_t Nnd__GetInt32(nnd_type SrcType, const void *Src)
@@ -372,7 +374,8 @@ static const char *Nnd__SerializeFp32ToCSource(
             Nnd__SerializeValueToCSource(SourceFile, FConfig->C.InfoType, NND_TYPE_INT32, &ScalarShift);
             fprintf(SourceFile, ",\n    .NodeCountPerLayer = s_NodeCountPerLayer");
             fprintf(SourceFile, ",\n    .Weights = s_QWeights");
-            fprintf(SourceFile, "};\n");
+            fprintf(SourceFile, ",\n    .WeightCount = %"PRIi64"", NN->WeightCount);
+            fprintf(SourceFile, "\n};\n");
         }
         else
         {
