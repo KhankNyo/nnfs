@@ -2,7 +2,7 @@
 #define NEURALNET_H
 
 #include <stdbool.h>
-#include "nnd.h"
+#include <stdint.h>
 
 typedef struct neuralnet neuralnet;
 typedef struct neuralnet_layer neuralnet_layer;
@@ -82,9 +82,8 @@ float NeuralNet_CalcLoss(neuralnet *NN, const float *ExpectedOutputs, int Output
 
 void NeuralNet_Print(const neuralnet *NN);
 float *NeuralNet_GetOutput(neuralnet *NN);
+float NeuralNet_GetQuantizationScalar(const neuralnet *NN, float QuantizedTypeMax);
 
-/* returns NULL if there are no error, otherwise returns an error message (static lifetime, DO NOT call free) */
-const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Config);
 
 
 struct neuralnet
@@ -135,8 +134,6 @@ struct neuralnet_layer
 #include <float.h>
 #include <string.h>
 
-#define NND_IMPLEMENTATION
-#include "nnd.h"
 
 
 #define NN__ALLOC(p_nn, size_bytes) \
@@ -530,7 +527,21 @@ float *NeuralNet_GetOutput(neuralnet *NN)
     return NN->Layers[NN->LayerCount - 1].Outputs;
 }
 
+float NeuralNet_GetQuantizationScalar(const neuralnet *NN, float QuantizedTypeMax)
+{
+    /* scalar quantization */
+    neuralnet_param_stats Stats = NeuralNet_GetParamStats(NN);
+    float Min = NN__MIN(Stats.WeightMin, Stats.BiasMin);
+    float Max = NN__MAX(Stats.WeightMax, Stats.BiasMax);
+    Min = fabs(Min);
+    Max = fabs(Max);
+    float Alpha = NN__MAX(Min, Max);
 
+    float QScalar = QuantizedTypeMax / Alpha;
+    return QScalar;
+}
+
+#if 0
 const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Config)
 {
     float QScalarInvShifted = 1.0;
@@ -571,6 +582,7 @@ const char *NeuralNet_Serialize(const neuralnet *NN, nnd_serialize_config *Confi
     NN__FREE(NN, NodeCount);
     return ErrorMessage;
 }
+#endif
 
 
 static void *NN__DefaultAllocatorCallback(void *Data, neuralnet_allocator_param *Param)

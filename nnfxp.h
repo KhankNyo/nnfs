@@ -32,7 +32,7 @@ typedef struct nnfxp_feedforward_config nnfxp_feedforward_config;
 typedef struct nnfxp_allocator_param nnfxp_allocator_param;
 typedef struct nnfxp_config nnfxp_config;
 typedef struct nnfxp_param_stats nnfxp_param_stats;
-typedef struct nnfxp_deserialize_config nnfxp_deserialize_config;
+typedef struct nnfxp_model_config nnfxp_model_config;
 typedef enum
 {
     NNFXP_ALLOCATE,
@@ -41,8 +41,12 @@ typedef enum
 typedef enum
 {
     NNFXP_CONFIG_NONE = 0,
-    NNFXP_CONFIG_FEEDFORWARD_ONLY = 1 << 0,
 } nnfxp_config_flags;
+typedef enum
+{
+    NNFXP_MODEL_FLAG_NONE = 0,
+    NNFXP_MODEL_FLAG_DONT_COPY_WEIGHTS = 1 << 0, /* provided weights will be used by nnfxp without copying */
+} nnfxp_model_flags;
 typedef void *(*nnfxp_allocator_callback)(void *UserData, nnfxp_allocator_param *Param);
 typedef nnfxp_type (*nnfxp_activation_callback)(void *UserData, nnfxp_type X);
 typedef nnfxp_type (*nnfxp_rand_callback)(void *UserData);
@@ -81,12 +85,12 @@ struct nnfxp_config
     nnfxp_activation_callback ActivationCallback;
 };
 
-struct nnfxp_deserialize_config
+struct nnfxp_model_config
 {
-    nnfxp_config NnConfig;
     const nnfxp_qtype *Weights;
-    int QScalarInvShift;
-    nnfxp_type QScalarInv;
+    nnfxp_model_flags Flags;
+    int QScalarInvShift;        /* b in 2^b, use 0 if weights are not quantized */
+    nnfxp_type QScalarInv;      /* 1/(quantization scalar) * 2^b, use NNFXP_ONE if weights are not quantized */
 };
 
 struct nnfxp_feedforward_config
@@ -97,7 +101,7 @@ struct nnfxp_feedforward_config
 
 
 void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config);
-void Nnfxp_Deserialize(nnfxp *NN, const nnfxp_deserialize_config *Config);
+void Nnfxp_CreateFromModel(nnfxp *NN, const nnfxp_config *Config, const nnfxp_model_config *ModelConfig);
 void Nnfxp_Destroy(nnfxp *NN);
 
 void Nnfxp_Randomize(nnfxp *NN);
@@ -148,9 +152,7 @@ struct nnfxp_layer
 
     /* OutputCount */
     nnfxp_xtype *OutputsX;
-    nnfxp_xtype *DeltasX;
     nnfxp_type *OutputActivated;
-    nnfxp_type *Deltas;
 };
 
 struct nnfxp
@@ -163,7 +165,10 @@ struct nnfxp
     int LayerCount;
     nnfxp_type *Inputs;
     nnfxp_layer *Layers;
-    void *ScratchMatrix;
+
+    int32_t WeightCount;
+    nnfxp_qtype *Weights;
+    void *Arena;
 
     void *AllocatorData;
     nnfxp_allocator_callback AllocatorCallback;
@@ -314,6 +319,7 @@ static void Nnfxp__Init(
     void *ActivationData, nnfxp_activation_callback ActivationCallback,
     nnfxp_qtype *Weights
 ) {
+    (void)Flags;
     assert(LayerCount >= 1 && "must have at leaast 1 layer (output layer)");
     *NN = (nnfxp) { 
         .InputCount = InputCount,
@@ -352,48 +358,74 @@ static void Nnfxp__Init(
         NN->ActivationData = NULL;
     }
 
+#define NNFXP__ARENA_ALLOC(arena, sizebytes) (void *)((arena += sizebytes), arena - (sizebytes))
     /* allocate needed mem */
+    uint8_t *Arena = NULL;
+    nnfxp_qtype *WeightArena = NULL;
     {
-        NN->Inputs = NNFXP__ALLOC(NN, sizeof(NN->Inputs[0]) * NN->InputCountB);
-        NN->Inputs[NN->InputCountB - 1] = NNFXP_ONE;
-        NN->Layers = NNFXP__ALLOC(NN, sizeof(NN->Layers[0]) * NN->LayerCount);
-        int InputCount = NN->InputCount;
+        intptr_t WeightSizeBytes = 0;
+        intptr_t SizeBytes = sizeof(NN->Inputs[0]) * NN->InputCountB
+                        + sizeof(NN->Layers[0]) * NN->LayerCount;
         int InputCountB = NN->InputCountB;
-        int LargestSide = InputCountB;
         for (int i = 0; i < LayerCount; i++)
         {
             int OutputCount = NodeCountPerLayer[i];
+            int WeightCount = OutputCount*InputCountB;
 
-            if (Weights)
+            if (!Weights)
             {
-                NN->Layers[i].Weights = Weights;
-                Weights += InputCountB*OutputCount;
+                WeightSizeBytes += WeightCount*sizeof(NN->Layers[0].Weights[0]);
+            }
+            SizeBytes += WeightCount*sizeof(NN->Layers[0].Weights[0]);
+            SizeBytes += (OutputCount + 1)*sizeof(NN->Layers[0].OutputActivated[0]);
+            SizeBytes += (OutputCount + 1)*sizeof(NN->Layers[0].OutputsX[0]);
+
+            InputCountB = OutputCount + 1;
+        }
+
+        Arena = NNFXP__ALLOC(NN, SizeBytes);
+        NN->Arena = Arena;
+        NN->Weights = Weights;
+        if (!Weights)
+        {
+            WeightArena = NNFXP__ARENA_ALLOC(Arena, WeightSizeBytes);
+            NN->Weights = WeightArena;
+        }
+    }
+
+    /* allocate needed mem */
+    {
+        NN->Inputs = NNFXP__ARENA_ALLOC(Arena, sizeof(NN->Inputs[0]) * NN->InputCountB);
+        NN->Layers = NNFXP__ARENA_ALLOC(Arena, sizeof(NN->Layers[0]) * NN->LayerCount);
+        NN->WeightCount = 0;
+        int InputCount = NN->InputCount;
+        int InputCountB = NN->InputCountB;
+        for (int i = 0; i < LayerCount; i++)
+        {
+            int OutputCount = NodeCountPerLayer[i];
+            int WeightCount = OutputCount*InputCountB;
+
+            NN->WeightCount += WeightCount;
+            if (!Weights)
+            {
+                NN->Layers[i].Weights = NNFXP__ARENA_ALLOC(WeightArena, WeightCount);
             }
             else
             {
-                NN->Layers[i].Weights = NNFXP__ALLOC(NN, OutputCount*InputCountB*sizeof(NN->Layers[0].Weights[0]));
+                NN->Layers[i].Weights = NNFXP__ARENA_ALLOC(Weights, WeightCount);
             }
-            if (!(Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
-            {
-                NN->Layers[i].Deltas = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].Deltas[0]));
-                NN->Layers[i].DeltasX = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].DeltasX[0]));
-            }
-            NN->Layers[i].OutputsX = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].OutputsX[0]));
-            NN->Layers[i].OutputActivated = NNFXP__ALLOC(NN, (OutputCount + 1)*sizeof(NN->Layers[0].OutputActivated[0]));
+            NN->Layers[i].OutputActivated = NNFXP__ARENA_ALLOC(Arena, (OutputCount + 1)*sizeof(NN->Layers[0].OutputActivated[0]));
             NN->Layers[i].OutputActivated[OutputCount] = NNFXP_ONE;
+            NN->Layers[i].OutputsX = NNFXP__ARENA_ALLOC(Arena, (OutputCount + 1)*sizeof(NN->Layers[0].OutputsX[0]));
             NN->Layers[i].InputCount = InputCount;
             NN->Layers[i].InputCountB = InputCountB;
             NN->Layers[i].OutputCount = OutputCount;
 
             InputCount = OutputCount;
             InputCountB = OutputCount + 1;
-            LargestSide = NNFXP__MAX(OutputCount + 1, LargestSide);
-        }
-        if (!(Flags & NNFXP_CONFIG_FEEDFORWARD_ONLY))
-        {
-            NN->ScratchMatrix = NNFXP__ALLOC(NN, LargestSide*LargestSide*sizeof(nnfxp_xtype));
         }
     }
+#undef NN__ARENA_ALLOC
 }
 
 
@@ -409,39 +441,47 @@ void Nnfxp_Create(nnfxp *NN, const nnfxp_config *Config)
         Config->ActivationData, Config->ActivationCallback,
         NULL
     );
+    NN->QScalarInv = NNFXP_ONE;
     Nnfxp_Randomize(NN);
 }
 
-void Nnfxp_Deserialize(nnfxp *NN, const nnfxp_deserialize_config *Config)
+void Nnfxp_CreateFromModel(nnfxp *NN, const nnfxp_config *Config, const nnfxp_model_config *ModelConfig)
 {
-    assert(Config->Weights);
-    Nnfxp__Init(NN, 
-        Config->NnConfig.Flags,
-        Config->NnConfig.LayerCount, Config->NnConfig.InputCount,
-        Config->NnConfig.NodeCountPerLayer,
-        Config->NnConfig.AllocatorData, Config->NnConfig.AllocatorCallback, 
-        Config->NnConfig.RandData, Config->NnConfig.RandCallback,
-        Config->NnConfig.ActivationData, Config->NnConfig.ActivationCallback,
-        (nnfxp_qtype *)Config->Weights
-    );
-    NN->QScalarInvShift = Config->QScalarInvShift;
-    NN->QScalarInv = Config->QScalarInv;
+    assert(ModelConfig->Weights);
+    if (ModelConfig->Flags & NNFXP_MODEL_FLAG_DONT_COPY_WEIGHTS)
+    {
+        /* init with weights treated as weak pointer (no copying and no ownership) */
+        Nnfxp__Init(NN, 
+            Config->Flags,
+            Config->LayerCount, Config->InputCount,
+            Config->NodeCountPerLayer,
+            Config->AllocatorData, Config->AllocatorCallback, 
+            Config->RandData, Config->RandCallback,
+            Config->ActivationData, Config->ActivationCallback,
+            (nnfxp_qtype *)ModelConfig->Weights
+        );
+    }
+    else
+    {
+        /* init with weights copied */
+        Nnfxp__Init(NN, 
+            Config->Flags,
+            Config->LayerCount, Config->InputCount,
+            Config->NodeCountPerLayer,
+            Config->AllocatorData, Config->AllocatorCallback, 
+            Config->RandData, Config->RandCallback,
+            Config->ActivationData, Config->ActivationCallback,
+            NULL
+        );
+        memcpy(NN->Weights, ModelConfig->Weights, NN->WeightCount*sizeof(NN->Weights[0]));
+    }
+    NN->QScalarInv = ModelConfig->QScalarInv;
+    NN->QScalarInvShift = ModelConfig->QScalarInvShift;
 }
 
 void Nnfxp_Destroy(nnfxp *NN)
 {
-    for (int i = 0; i < NN->LayerCount; i++)
-    {
-        if (!NN->ReadOnlyWeights)
-            NNFXP__FREE(NN, NN->Layers[i].Weights);
-        NNFXP__FREE(NN, NN->Layers[i].Deltas);
-        NNFXP__FREE(NN, NN->Layers[i].DeltasX);
-        NNFXP__FREE(NN, NN->Layers[i].OutputActivated);
-        NNFXP__FREE(NN, NN->Layers[i].OutputsX);
-    }
-    NNFXP__FREE(NN, NN->Layers);
-    NNFXP__FREE(NN, NN->Inputs);
-    NNFXP__FREE(NN, NN->ScratchMatrix);
+    NNFXP__FREE(NN, NN->Arena);
 }
 
 void Nnfxp_Randomize(nnfxp *NN)
@@ -576,11 +616,6 @@ void Nnfxp_Print(nnfxp *NN)
         printf("        node vals:  [ ");
         for (int k = 0; k < Layer->OutputCount + 1; k++)
             printf("%6.3f ", NNFXP_FLT(Layer->OutputActivated[k]));
-        printf("]\n");
-
-        printf("        node delta: [ ");
-        for (int k = 0; k < Layer->OutputCount; k++)
-            printf("%6.3f ", NNFXP_FLT(Layer->Deltas[k]));
         printf("]\n");
 
         printf("        weights:\n");

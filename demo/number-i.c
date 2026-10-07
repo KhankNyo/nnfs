@@ -28,9 +28,12 @@
 #define NEURALNET_IMPLEMENTATION
 #include "neuralnet.h"
 
+#define NND_IMPLEMENTATION
+#include "nnd.h"
 
-#define WEIGHT_FILE_NAME "number-i-weights"
-#define WEIGHT_FILE_VARIABLE_NAME g_Model
+
+#define MODEL_FILE_NAME "number-i-weights"
+#define MODEL g_Model
 #define STRFY1(x) #x
 #define STRFY(x) STRFY1(x)
 #define COMPRESSED_WEIGHT_TYPE NND_TYPE_INT8
@@ -126,15 +129,30 @@ static void CopyNeuralNetToNnfxp(nnfxp *Nnfxp, neuralnet *NN)
 
 static void Serialize(neuralnet *Fp32NN, const char *FileName, nnd_file_format Format, nnd_file_format_config *FConfig)
 {
+    const char *ErrMsg = Nnd_SerializeFp32(
+        Fp32NN, 
+        &(nnd_serialize_config) {
+            .Flags = NND_FLAG_ENABLE_QUANTIZATION,
+            .FileFormat = Format,
+            .QWeightType = COMPRESSED_WEIGHT_TYPE,
+            .DQWeightType = ARITH_TYPE,
+            .DQWeightFxpDecimal = NNFXP_FRACTION_BITS,
+            .FilePathNoExtension = MODEL_FILE_NAME,
+            .FileFormatConfig = *FConfig,
+        }
+    );
+
+#if 0
     const char *ErrMsg = NeuralNet_Serialize(Fp32NN, &(nnd_serialize_config) {
         .Flags = NND_FLAG_ENABLE_QUANTIZATION,
         .FileFormat = Format,
         .WeightType = COMPRESSED_WEIGHT_TYPE,
         .QScalarInvType = ARITH_TYPE,
-        .FilePathNoExtension = WEIGHT_FILE_NAME,
+        .FilePathNoExtension = MODEL_FILE_NAME,
         .QScalarFxpShift = NNFXP_FRACTION_BITS,
         .FileFormatConfig = *FConfig,
     });
+#endif
     if (ErrMsg)
     {
         printf("Unable to serialize to '%s.h/c': %s\n", FileName, ErrMsg);
@@ -578,16 +596,19 @@ int main(int ArgumentCount, char **Arguments)
             .NodeCountPerLayer = ModelArchitectureBuzzword,
         });
 #else
-        Nnfxp_Deserialize(&NN, &(nnfxp_deserialize_config) {
-            .NnConfig = {
-                .InputCount = WEIGHT_FILE_VARIABLE_NAME.InputCount,
-                .LayerCount = WEIGHT_FILE_VARIABLE_NAME.LayerCount,
-                .NodeCountPerLayer = WEIGHT_FILE_VARIABLE_NAME.NodeCountPerLayer,
+        Nnfxp_CreateFromModel(
+            &NN, 
+            &(nnfxp_config) {
+                .InputCount = MODEL.InputCount,
+                .LayerCount = MODEL.LayerCount,
+                .NodeCountPerLayer = MODEL.NodeCountPerLayer,
             },
-            .QScalarInv = WEIGHT_FILE_VARIABLE_NAME.QScalarInvShifted,
-            .QScalarInvShift = WEIGHT_FILE_VARIABLE_NAME.QScalarInvShamt,
-            .Weights = WEIGHT_FILE_VARIABLE_NAME.Weights,
-        });
+            &(nnfxp_model_config) {
+                .QScalarInv = MODEL.QScalarInvShifted,
+                .QScalarInvShift = MODEL.QScalarInvShamt,
+                .Weights = MODEL.Weights,
+            }
+        );
 #endif
         neuralnet Fp32NN = NeuralNet_Create(&(neuralnet_config) {
             .InputCount = IMAGE_PIXEL_COUNT,
@@ -630,9 +651,9 @@ int main(int ArgumentCount, char **Arguments)
                     "    L    - Display learning rate\n"
                     "    Y    - Display L2 regularization lambda\n"
                     "    I    - Toggle backpropagation for input prediction (int)\n",
-                    WEIGHT_FILE_NAME,
-                    WEIGHT_FILE_NAME,
-                    WEIGHT_FILE_NAME,
+                    MODEL_FILE_NAME,
+                    MODEL_FILE_NAME,
+                    MODEL_FILE_NAME,
                     InputFileName,
                     TrainingFileName,
                     TestingFileName,
@@ -687,12 +708,12 @@ int main(int ArgumentCount, char **Arguments)
             {
                 Serialize(
                     &Fp32NN, 
-                    WEIGHT_FILE_NAME,
+                    MODEL_FILE_NAME,
                     NND_FILE_FORMAT_C,
                     &(nnd_file_format_config) { .C = {
                         .InfoType = INFO_TYPE,
                         .HeaderGuard = "WEIGHTS_H",
-                        .VariableName = STRFY(WEIGHT_FILE_VARIABLE_NAME),
+                        .ModelName = STRFY(MODEL),
                     }}
                 );
             } break;
@@ -700,7 +721,7 @@ int main(int ArgumentCount, char **Arguments)
             {
                 Serialize(
                     &Fp32NN, 
-                    WEIGHT_FILE_NAME,
+                    MODEL_FILE_NAME,
                     NND_FILE_FORMAT_NND,
                     &(nnd_file_format_config) { 0 }
                 );
