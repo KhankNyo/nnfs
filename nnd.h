@@ -179,9 +179,7 @@ static float Nnd__GetFp32(nnd_type SrcType, const void *Src)
     } break;
     case NND_TYPE_FP32:
     {
-        float Tmp = 0;
-        memcpy(&Tmp, Src, 4);
-        Result = NND__CLAMP(INT32_MIN, Tmp, INT32_MAX);
+        memcpy(&Result, Src, 4);
     } break;
     }
     return Result;
@@ -194,13 +192,11 @@ static void Nnd__SerializeValueToCSource(FILE *File, nnd_type DstType, nnd_type 
     case NND_TYPE_INT8:
     {
         int32_t Value = Nnd__GetInt32(SrcType, Src);
-        Value = NND__CLAMP(INT8_MIN, Value, INT8_MAX);
         fprintf(File, "%d", Value);
     } break;
     case NND_TYPE_INT16:
     {
         int32_t Value = Nnd__GetInt32(SrcType, Src);
-        Value = NND__CLAMP(INT16_MIN, Value, INT16_MAX);
         fprintf(File, "%d", Value);
     } break;
     case NND_TYPE_INT32:
@@ -247,7 +243,7 @@ static void Nnd__SerializeValueToMemory(uint8_t Dst[8], nnd_type DstType, nnd_ty
 
 static void Nnd__QuantizeValue(void *Dst, nnd_type DstType, float QScalar, float QValue)
 {
-    float Result = QScalar * QValue + 0.5;
+    float Result = QScalar * QValue;
     switch (DstType)
     {
     case NND_TYPE_FP32:
@@ -256,12 +252,12 @@ static void Nnd__QuantizeValue(void *Dst, nnd_type DstType, float QScalar, float
     } break;
     case NND_TYPE_INT8:
     {
-        int8_t Value = NND__CLAMP(INT8_MIN, Result, INT8_MAX);
+        int8_t Value = NND__CLAMP(-INT8_MAX, Result, INT8_MAX);
         memcpy(Dst, &Value, sizeof Value);
     } break;
     case NND_TYPE_INT16:
     {
-        int16_t Value = NND__CLAMP(INT16_MIN, Result, INT16_MAX);
+        int16_t Value = NND__CLAMP(-INT16_MAX, Result, INT16_MAX);
         memcpy(Dst, &Value, sizeof Value);
     } break;
     case NND_TYPE_INT32:
@@ -480,8 +476,9 @@ const char *Nnd_SerializeFp32(
 ) {
     const char *ErrorMessage = NULL;
     float Scalar = 0;
-    float ScalarInvShifted = 0;
+    float ScalarInvShifted = 1.0;
     int ScalarShift = 0;
+    if (Config->Flags & NND_FLAG_ENABLE_QUANTIZATION)
     {
         float QWeightMax = Nnd_GetTypeMax(Config->QWeightType);
         float DQWeightMax = Nnd_GetTypeMax(Config->DQWeightType);

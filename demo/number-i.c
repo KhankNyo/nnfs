@@ -28,6 +28,7 @@
 #include "nnd.h"
 
 
+#define TYPE_MAX(signed_type) ((((signed_type)1 << (sizeof(signed_type)*8-2)) - 1) | ((signed_type)1 << (sizeof(signed_type)*8-2)))
 #define NNFXP_FRACTION_BITS 8
 #define NNFXP_TYPE_COMBO NNFXP_TYPE_16x8q
 #define nnfxp_dqtype int16_t
@@ -114,15 +115,16 @@ static void CopyNeuralNetToNnfxp(nnfxp *Nnfxp, const nnfxp_config *Config, const
     Nnfxp_Destroy(Nnfxp);
     memset(Nnfxp, 0, sizeof *Nnfxp);
 
-    float QScalar = NeuralNet_GetQuantizationScalar(NN, INT8_MAX);
+    float QScalar = NeuralNet_GetQuantizationScalar(NN, TYPE_MAX(nnfxp_qtype));
+    int Shift = log2f(QScalar * ((float)TYPE_MAX(nnfxp_dqtype) / TYPE_MAX(nnfxp_qtype)));
     Nnfxp_CreateFromFp32Model(
         Nnfxp, 
         Config,
         &(nnfxp_model_config) {
             .Weights = NN->Weights,
             .WeightCount = NN->WeightCount,
-            .QScalarInv = (1 << 12) / QScalar,
-            .QScalarInvShift = 12,
+            .QScalarInv = (1 << Shift) / QScalar,
+            .QScalarInvShift = Shift,
         }
     );
 }
@@ -551,8 +553,8 @@ int main(int ArgumentCount, char **Arguments)
 #else
 #define MODEL_LAYER_COUNT 3
     int ModelArchitectureBuzzword[MODEL_LAYER_COUNT] = {
-        [0] = 128,
-        [1] = 64,
+        [0] = 127,
+        [1] = 63,
         [2] = DIGIT_COUNT, /* output layer */
     };
 #endif

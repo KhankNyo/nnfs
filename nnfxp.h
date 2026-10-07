@@ -99,7 +99,7 @@ struct nnfxp_feedforward_config
 };
 
 
-/* returns false if overflow occurred, true otherwise */
+/* returns true if overflow occurred, false otherwise */
 bool Nnfxp_CreateFromFp32Model(nnfxp *NN, const nnfxp_config *Config, const nnfxp_model_config *ModelConfig);
 void Nnfxp_CreateFromIntModel(nnfxp *NN, const nnfxp_config *Config, const nnfxp_model_config *ModelConfig);
 void Nnfxp_Destroy(nnfxp *NN);
@@ -555,6 +555,10 @@ bool Nnfxp_CreateFromFp32Model(nnfxp *NN, const nnfxp_config *Config, const nnfx
     for (int i = 0; i < ModelConfig->WeightCount; i++)
     {
         float QWeight = WeightPtr[i] * Scalar;
+        if (QWeight > QTypeMax)
+            QWeight = QTypeMax;
+        else if (QWeight < -QTypeMax)
+            QWeight = -QTypeMax;
         Overflowed = !NNFXP__IN_RANGE(-QTypeMax, QWeight, QTypeMax);
         nnfxp_type IntQWeight = QWeight;
         Nnfxp__QStore(NN, NN->Weights, i, IntQWeight);
