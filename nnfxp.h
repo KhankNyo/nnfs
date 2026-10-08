@@ -72,6 +72,7 @@ struct nnfxp_config
     nnfxp_config_flags Flags;
     int InputCount;
     int LayerCount;
+    int Alignment; /* alignment of rows in weights and input/output vector */
     const int *NodeCountPerLayer;
 
     void *AllocatorData;
@@ -85,9 +86,10 @@ struct nnfxp_config
 
 struct nnfxp_model_config
 {
-    const void *Weights;
-    int WeightCount;
     nnfxp_model_flags Flags;
+    int WeightCount;
+    const void *Weights;
+    int RowAlignment;           /* alignment of each row in the weight matrix, provide 0 if it is the same as nnfxp_config.Alignment */
     int QScalarInvShift;        /* b in 2^b, use 0 if weights are not quantized */
     nnfxp_type QScalarInv;      /* 1/(quantization scalar) * 2^b, defaults to 1 (NNFXP_ONE) if <= 0 was given */
 };
@@ -110,6 +112,8 @@ nnfxp_type Nnfxp_CalcLoss(nnfxp *NN, const nnfxp_type *ExpectedOutputs, int Outp
 void *Nnfxp_GetOutputs(nnfxp *NN);
 nnfxp_type Nnfxp_GetOutput(const nnfxp *NN, intptr_t Index);
 void Nnfxp_Print(nnfxp *NN);
+
+intptr_t Nnfxp_AlignUp(intptr_t Value, intptr_t Alignment);
 
 
 #define NNFXP_TYPE_MAX (nnfxp_type)((1llu << (sizeof(nnfxp_type)*8)) - 1)
@@ -146,7 +150,7 @@ struct nnfxp_layer
     int InputCountB;
     int OutputCount;
     /* InputCountB x OutputCount */
-    const void *Weights;
+    void *Weights;
 
     /* OutputCount */
     void *Outputs;
@@ -156,6 +160,7 @@ struct nnfxp
 {
     void *Arena;
 
+    int Alignment;
     int FxpDecimal;
     nnfxp_type_combo TypeCombo;
     int QScalarInvShift;
@@ -230,20 +235,22 @@ static dequantized_type dp_name(\
 \
 static void matmul_name(\
     dequantized_type *Out, const quantized_type *A, const dequantized_type *BT, int RowA, int ColA, int RowBT, \
-    nnfxp_type QScalar, int Shift\
+    nnfxp_type QScalar, int Shift, int StrideA, int StrideBT\
 ) {\
+    if (!StrideA) StrideA = RowA;\
+    if (!StrideBT) StrideBT = RowBT;\
     for (int Ca = 0; Ca < ColA; Ca++) {\
         for (int Rbt = 0; Rbt < RowBT; Rbt++) {\
-            const quantized_type *RowMatA = A + Ca*RowA;\
-            const dequantized_type *ColMatB = BT + Rbt*RowA;\
+            const quantized_type *RowMatA = A + Ca*StrideA;\
+            const dequantized_type *ColMatB = BT + Rbt*StrideBT;\
             dequantized_type Dp = dp_name(RowMatA, ColMatB, RowA, QScalar, Shift);\
-            Out[Ca*RowBT + Rbt] = Dp;\
+            Out[Ca*StrideBT + Rbt] = Dp;\
         }\
     }\
 }\
 static void matmul_name(\
     dequantized_type *Out, const quantized_type *A, const dequantized_type *BT, int RowA, int ColA, int RowBT, \
-    nnfxp_type QScalar, int Shift\
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
 )
 
 NNFXP__DEFINE(Nnfxp__Dp_32x32q, Nnfxp__MatMulABT_32x32q, int32_t, int32_t);
@@ -258,12 +265,25 @@ NNFXP__DEFINE(Nnfxp__Dp_8x8q, Nnfxp__MatMulABT_8x8q, int8_t, int8_t);
 #define NNFXP__DQ_SIZE(p_nn) (Nnfxp__GetDqTypeSize((p_nn)->TypeCombo))
 #define NNFXP__Q_SIZE(p_nn) (Nnfxp__GetQTypeSize((p_nn)->TypeCombo))
 #define NNFXP__ONE(p_nn) NNFXP_ONE((p_nn)->FxpDecimal)
+#define NNFXP__ALIGN_UP(value) Nnfxp_AlignUp(value, NN->Alignment)
+#define NNFXP__ALIGN_PTR_UP(ptr) (typeof(ptr))Nnfxp_AlignUp((intptr_t)(ptr), NN->Alignment)
 
 
 
-typedef void (*nnfxp__matmul_callback)(void *Dst, const void *A, const void *BT, int RowA, int ColA, int RowBT, nnfxp_type QScalar, int Shift);
+typedef void (*nnfxp__matmul_callback)(
+    void *Dst, const void *A, const void *BT, 
+    int RowA, int ColA, int RowBT, nnfxp_type QScalar, int Shift,
+    int StrideA, int StrideB
+);
 
 
+intptr_t Nnfxp_AlignUp(intptr_t Value, intptr_t Alignment)
+{
+    if ((Value & (Alignment - 1)) == 0) 
+        return Value;
+    intptr_t Result = (Value + Alignment) - (Value & (Alignment - 1));
+    return Result;
+}
 
 static int Nnfxp__GetDqTypeSize(nnfxp_type_combo Combo)
 {
@@ -418,6 +438,12 @@ static void Nnfxp__Sigmoid(void *Data, void *Vector, int VectorLength, int ElemS
     }
 }
 
+static int Nnfxp__GetWeightStride(const nnfxp *NN, int InputCountB)
+{
+    int QSize = NNFXP__Q_SIZE(NN);
+    return NNFXP__ALIGN_UP(InputCountB * QSize) / QSize;
+}
+
 static void Nnfxp__Init(
     nnfxp *NN, 
     const nnfxp_config *Config,
@@ -425,6 +451,7 @@ static void Nnfxp__Init(
     nnfxp_type QScalarInv, int QScalarInvShift
 ) {
     assert(Config->LayerCount >= 1 && "must have at leaast 1 layer (output layer)");
+    assert((Config->Alignment & (Config->Alignment - 1)) == 0 && "Alignment must be a power of 2");
     *NN = (nnfxp) { 
         .InputCount = Config->InputCount,
         .InputCountB = Config->InputCount + 1,
@@ -436,6 +463,7 @@ static void Nnfxp__Init(
         .TypeCombo = Config->TypeCombo,
         .FxpDecimal = Config->FxpDecimal,
         .WeightElemSize = Nnfxp__GetQTypeSize(Config->TypeCombo),
+        .Alignment = Config->Alignment > 0? Config->Alignment : 1,
     };
     switch (Config->TypeCombo)
     {
@@ -473,57 +501,64 @@ static void Nnfxp__Init(
     uint8_t *Arena = NULL;
     uint8_t *WeightArena = NULL;
     {
-        intptr_t WeightSizeBytes = 0;
-        intptr_t SizeBytes = NNFXP__DQ_SIZE(NN) * NN->InputCountB
-                        + sizeof(NN->Layers[0]) * NN->LayerCount;
+        intptr_t SizeBytes = NNFXP__ALIGN_UP(NNFXP__DQ_SIZE(NN) * NN->InputCountB);
+        SizeBytes += NNFXP__ALIGN_UP(sizeof(NN->Layers[0]) * NN->LayerCount);
         int InputCountB = NN->InputCountB;
+
+        intptr_t TotalWeightSizeBytes = 0;
         for (int i = 0; i < Config->LayerCount; i++)
         {
             int OutputCount = Config->NodeCountPerLayer[i];
-            int WeightCount = OutputCount*InputCountB;
 
             if (!Weights)
             {
-                WeightSizeBytes += WeightCount*NNFXP__Q_SIZE(NN);
-                SizeBytes += WeightCount*NNFXP__Q_SIZE(NN);
+                int WeightSizeBytes = OutputCount*NNFXP__ALIGN_UP(InputCountB*NNFXP__Q_SIZE(NN));
+                TotalWeightSizeBytes += WeightSizeBytes;
+                SizeBytes += WeightSizeBytes;
             }
-            SizeBytes += (OutputCount + 1)*NNFXP__DQ_SIZE(NN);
+            int OutputSizeBytes = NNFXP__ALIGN_UP((OutputCount + 1)*NNFXP__DQ_SIZE(NN));
+            SizeBytes += OutputSizeBytes;
 
             InputCountB = OutputCount + 1;
         }
 
-        Arena = NNFXP__ALLOC(NN, SizeBytes);
-        NN->Arena = Arena;
-        NN->Weights = (void *)Weights; /* NOTE: const cast */
+        SizeBytes = NNFXP__ALIGN_UP(SizeBytes + NN->Alignment);
+        NN->Arena = NNFXP__ALLOC(NN, SizeBytes);
+        Arena = NNFXP__ALIGN_PTR_UP(NN->Arena);
+
         if (!Weights)
         {
-            WeightArena = NNFXP__ARENA_ALLOC(Arena, WeightSizeBytes);
-            NN->Weights = WeightArena;
+            WeightArena = NNFXP__ARENA_ALLOC(Arena, TotalWeightSizeBytes);
         }
+        else
+        {
+            WeightArena = (uint8_t *)Weights; /* NOTE: const cast */
+        }
+        NN->Weights = WeightArena;
     }
 
     /* allocate needed mem */
     {
-        NN->Inputs = NNFXP__ARENA_ALLOC(Arena, NNFXP__DQ_SIZE(NN) * NN->InputCountB);
-        NN->Layers = NNFXP__ARENA_ALLOC(Arena, sizeof(NN->Layers[0]) * NN->LayerCount);
+        {
+            intptr_t InputSizeBytes = NNFXP__ALIGN_UP(NNFXP__DQ_SIZE(NN) * NN->InputCountB);
+            NN->Inputs = NNFXP__ARENA_ALLOC(Arena, InputSizeBytes);
+        }
+
+        intptr_t LayerSizeBytes = NNFXP__ALIGN_UP(sizeof(NN->Layers[0]) * NN->LayerCount);
+        NN->Layers = NNFXP__ARENA_ALLOC(Arena, LayerSizeBytes);
+
         NN->WeightCount = 0;
         int InputCount = NN->InputCount;
         int InputCountB = NN->InputCountB;
         for (int i = 0; i < NN->LayerCount; i++)
         {
             int OutputCount = Config->NodeCountPerLayer[i];
-            int WeightCount = OutputCount*InputCountB;
+            int WeightSizeBytes = OutputCount*NNFXP__ALIGN_UP(InputCountB*NNFXP__Q_SIZE(NN));
+            int OutputSizeBytes = NNFXP__ALIGN_UP((OutputCount + 1)*NNFXP__DQ_SIZE(NN));
 
-            NN->WeightCount += WeightCount;
-            if (!Weights)
-            {
-                NN->Layers[i].Weights = NNFXP__ARENA_ALLOC(WeightArena, WeightCount*NNFXP__Q_SIZE(NN));
-            }
-            else
-            {
-                NN->Layers[i].Weights = NNFXP__ARENA_ALLOC(Weights, WeightCount*NNFXP__Q_SIZE(NN));
-            }
-            NN->Layers[i].Outputs = NNFXP__ARENA_ALLOC(Arena, (OutputCount + 1)*NNFXP__DQ_SIZE(NN));
+            NN->WeightCount += OutputCount*InputCountB;
+            NN->Layers[i].Weights = NNFXP__ARENA_ALLOC(WeightArena, WeightSizeBytes);
+            NN->Layers[i].Outputs = NNFXP__ARENA_ALLOC(Arena, OutputSizeBytes);
             NN->Layers[i].InputCount = InputCount;
             NN->Layers[i].InputCountB = InputCountB;
             NN->Layers[i].OutputCount = OutputCount;
@@ -544,6 +579,7 @@ bool Nnfxp_CreateFromFp32Model(nnfxp *NN, const nnfxp_config *Config, const nnfx
     );
     assert(ModelConfig->Weights);
     assert(ModelConfig->WeightCount == NN->WeightCount && "Mismatched weight count");
+    int ModelAlignment = ModelConfig->RowAlignment > 0? ModelConfig->RowAlignment : 1;
 
     int QTypeSize = Nnfxp__GetQTypeSize(NN->TypeCombo);
     float QTypeMax = ((1ll << QTypeSize*8) - 1);
@@ -552,16 +588,31 @@ bool Nnfxp_CreateFromFp32Model(nnfxp *NN, const nnfxp_config *Config, const nnfx
     const float *WeightPtr = ModelConfig->Weights;
     float Scalar = (float)(1ll << ModelConfig->QScalarInvShift) / NN->QScalarInv;
     bool Overflowed = false;
-    for (int i = 0; i < ModelConfig->WeightCount; i++)
+    for (int i = 0; i < NN->LayerCount; i++)
     {
-        float QWeight = WeightPtr[i] * Scalar;
-        if (QWeight > QTypeMax)
-            QWeight = QTypeMax;
-        else if (QWeight < -QTypeMax)
-            QWeight = -QTypeMax;
-        Overflowed = !NNFXP__IN_RANGE(-QTypeMax, QWeight, QTypeMax);
-        nnfxp_type IntQWeight = QWeight;
-        Nnfxp__QStore(NN, NN->Weights, i, IntQWeight);
+        nnfxp_layer *Layer = NN->Layers + i;
+        int SrcStride = Nnfxp_AlignUp(Layer->InputCountB*sizeof(WeightPtr[0]), ModelAlignment) / sizeof(WeightPtr[0]);
+        int DstStride = Nnfxp__GetWeightStride(NN, Layer->InputCountB);
+
+        for (int k = 0; k < Layer->OutputCount; k++)
+        {
+            for (int j = 0; j < Layer->InputCountB; j++)
+            {
+                int SrcIndex = k*SrcStride + j;
+                int DstIndex = k*DstStride + j;
+
+                float QWeight = WeightPtr[SrcIndex] * Scalar;
+                if (QWeight > QTypeMax)
+                    QWeight = QTypeMax;
+                else if (QWeight < -QTypeMax)
+                    QWeight = -QTypeMax;
+                Overflowed = !NNFXP__IN_RANGE(-QTypeMax, QWeight, QTypeMax);
+
+                nnfxp_type IntQWeight = QWeight;
+                Nnfxp__QStore(NN, Layer->Weights, DstIndex, IntQWeight);
+            }
+        }
+        WeightPtr += Layer->OutputCount*SrcStride;
     }
     return Overflowed;
 }
@@ -571,6 +622,9 @@ void Nnfxp_CreateFromIntModel(nnfxp *NN, const nnfxp_config *Config, const nnfxp
     assert(ModelConfig->Weights);
     if (ModelConfig->Flags & NNFXP_MODEL_FLAG_DONT_COPY_WEIGHTS)
     {
+        assert((ModelConfig->RowAlignment == 0 || ModelConfig->RowAlignment == Config->Alignment)
+            && "Mismatched alignment"
+        );
         /* init with weights treated as weak pointer (no copying and no ownership) */
         Nnfxp__Init(
             NN, Config, ModelConfig->Weights, 
@@ -584,7 +638,14 @@ void Nnfxp_CreateFromIntModel(nnfxp *NN, const nnfxp_config *Config, const nnfxp
             NN, Config, NULL,
             ModelConfig->QScalarInv, ModelConfig->QScalarInvShift
         );
-        memcpy(NN->Weights, ModelConfig->Weights, NN->WeightCount*NNFXP__Q_SIZE(NN));
+        if (ModelConfig->RowAlignment == Config->Alignment || ModelConfig->RowAlignment == 0)
+        {
+            memcpy(NN->Weights, ModelConfig->Weights, NN->WeightCount*NNFXP__Q_SIZE(NN));
+        }
+        else
+        {
+            assert("TODO: loading int model with different alignment");
+        }
     }
     assert(ModelConfig->WeightCount == NN->WeightCount && "Mismatched weight count");
 }
@@ -609,12 +670,15 @@ void Nnfxp_FeedForward(nnfxp *NN, const nnfxp_feedforward_config *Config)
     for (int i = 0; i < NN->LayerCount; i++)
     {
         nnfxp_layer *Layer = &NN->Layers[i];
+        int WStride = Nnfxp__GetWeightStride(NN, Layer->InputCountB);
+        int XStride = 1;
         Nnfxp__DqStore(NN, X, Layer->InputCountB - 1, NNFXP__ONE(NN));
 
         MatMulABT(
             Layer->Outputs, Layer->Weights, X,
-            Layer->InputCountB, Layer->OutputCount, 1,
-            NN->QScalarInv, NN->QScalarInvShift
+            Layer->InputCountB, Layer->OutputCount, XStride,
+            NN->QScalarInv, NN->QScalarInvShift,
+            WStride, XStride
         );
         ActivateVector(
             NN->ActivationData, Layer->Outputs, Layer->OutputCount, NNFXP__DQ_SIZE(NN)
@@ -638,7 +702,7 @@ nnfxp_param_stats Nnfxp_GetParamStats(const nnfxp *NN)
         nnfxp_layer *Layer = NN->Layers + i;
         for (int k = 0; k < Layer->OutputCount; k++)
         {
-            int Col = k*Layer->InputCountB;
+            int Col = k*Nnfxp__GetWeightStride(NN, Layer->InputCountB);
             for (int j = 0; j < Layer->InputCount; j++)
             {
                 int Index = Col + j;
@@ -673,7 +737,8 @@ nnfxp_type Nnfxp_CalcLoss(nnfxp *NN, const nnfxp_type *ExpectedOutputs, int Outp
         {
             for (int k = 0; k < Layer->InputCount; k++)
             {
-                nnfxp_type Weight = Nnfxp__QLoadDQ(NN, Layer->Weights, h*Layer->InputCountB + k);
+                int Index = h*Nnfxp__GetWeightStride(NN, Layer->InputCountB) + k;
+                nnfxp_type Weight = Nnfxp__QLoadDQ(NN, Layer->Weights, Index);
                 Sum += NNFXP_MUL(Weight, Weight, NN->FxpDecimal);
             }
         }
@@ -729,7 +794,7 @@ void Nnfxp_Print(nnfxp *NN)
             printf("            [ ");
             for (int j = 0; j < Layer->InputCountB; j++)
             {
-                nnfxp_type Value = Nnfxp__QLoadDQ(NN, Layer->Weights, j + k*Layer->InputCountB);
+                nnfxp_type Value = Nnfxp__QLoadDQ(NN, Layer->Weights, j + k*Nnfxp__GetWeightStride(NN, Layer->InputCountB));
                 printf("%6.3f ", NNFXP_FLT(Value, NN->FxpDecimal));
             }
             printf("]\n");

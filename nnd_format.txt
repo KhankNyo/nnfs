@@ -21,11 +21,14 @@ byte offset         | type name, description
 16..23              | uint64 wo, offset to weight data from the beginning of file
 32..39              | uint64 wsb, size of weight data in bytes
 40..43              | type_uint32 wt, weight_type
-44..47              | uint32 w_decimal_place:
+44..45              | uint16 w_decimal_place:
                             if wt is (U)INT* and !(flags & NND_FLAG_QUANTIZED):
                                  decimal place for fixed point weights
                             else:
                                  ignore, should be 0
+46..47              | uint16 w_row_alignment
+                            alignment in bytes of each row of a weight matrix
+                            row stride = (input count + 1) + alignment - ((input count + 1) % alignment)
 48..51              | type_uint32 qscalar_type
                             # NOTE: should be the same type as the native type used for arithmetic during feedforward
 52..55              | uint32 qscalar_shamt, 
@@ -51,13 +54,14 @@ byte offset         | type name, description
 ao..wo              | arbitrary data of arbitrary length (can be 0 bytes) depending on version and flags
 wo..wo+wsb          | weight_type wd, weight data,
                             for each layer, the weight matrix[nrow][ncol] is in this format:
-                                 ---------------------ncol = ic + 1------------------------
-                                | w[0],             w[1],             ... w[ic] 
-                                | w[0 + ic],        w[1 + ic],        ... w[ic + ic] 
+                                 ==================== stride ================================================
+                                 -------------------- ncol = ic + 1 -----------------------------------
+                                | w[0],             w[1],             ... w[ic],                         0, 0,
+                                | w[0 + stride],        w[1 + stride],        ... w[ic + stride],        0, 0,
                                 | ...
                             nrow = nc
                                 | ...
-                                | w[0 + (nc-1)*ic], w[1 + (nc-1)*ic], ... w[ic + (nc-1)*ic]
+                                | w[0 + (nc-1)*stride], w[1 + (nc-1)*stride], ... w[ic + (nc-1)*stride], 0, 0
                                 # NOTE: w[ic] is the weight connected to the bias node (input node of value 1.0)
 
                             the input nodes should be in this format:

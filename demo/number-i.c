@@ -29,6 +29,7 @@
 
 
 #define TYPE_MAX(signed_type) ((((signed_type)1 << (sizeof(signed_type)*8-2)) - 1) | ((signed_type)1 << (sizeof(signed_type)*8-2)))
+#define ROW_ALIGNMENT 16
 #define NNFXP_FRACTION_BITS 8
 #define NNFXP_TYPE_COMBO NNFXP_TYPE_16x8q
 #define nnfxp_dqtype int16_t
@@ -140,6 +141,7 @@ static void Serialize(neuralnet *Fp32NN, const char *FileName, nnd_file_format F
             .QWeightType = COMPRESSED_WEIGHT_TYPE,
             .DQWeightType = ARITH_TYPE,
             .DQWeightFxpDecimal = NNFXP_FRACTION_BITS,
+            .QWeightRowAlignment = ROW_ALIGNMENT,
             .FilePathNoExtension = MODEL_FILE_NAME,
             .FileFormatConfig = *FConfig,
         }
@@ -583,6 +585,7 @@ int main(int ArgumentCount, char **Arguments)
             .InputCount = IMAGE_PIXEL_COUNT,
             .LayerCount = MODEL_LAYER_COUNT,
             .FxpDecimal = NNFXP_FRACTION_BITS,
+            .Alignment = ROW_ALIGNMENT,
             .TypeCombo = NNFXP_TYPE_COMBO,
             .NodeCountPerLayer = ModelArchitectureBuzzword,
         };
@@ -611,6 +614,7 @@ int main(int ArgumentCount, char **Arguments)
                 .QScalarInvShift = MODEL.QScalarInvShamt,
                 .Weights = MODEL.Weights,
                 .WeightCount = MODEL.WeightCount,
+                .RowAlignment = MODEL.WeightRowAlignment,
             }
         );
 #endif
