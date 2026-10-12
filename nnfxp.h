@@ -222,6 +222,40 @@ struct nnfxp
 #define NNFXP__MIN(a, b) ((a) < (b)? (a) : (b))
 
 
+#if defined(NNFXP_ESP32_SIMD)
+
+extern void Nnfxp__MatMulABT_32x32q(\
+    int32_t *Out, const int32_t *A, const int32_t *BT, int RowA, int ColA, int RowBT, \
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
+);
+
+extern void Nnfxp__MatMulABT_32x16q(\
+    int32_t *Out, const int16_t *A, const int32_t *BT, int RowA, int ColA, int RowBT, \
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
+);
+
+extern void Nnfxp__MatMulABT_32x8q(\
+    int32_t *Out, const int8_t *A, const int32_t *BT, int RowA, int ColA, int RowBT, \
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
+);
+
+extern void Nnfxp__MatMulABT_16x16q(\
+    int16_t *Out, const int16_t *A, const int16_t *BT, int RowA, int ColA, int RowBT, \
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
+);
+
+extern void Nnfxp__MatMulABT_16x8q(\
+    int16_t *Out, const int8_t *A, const int16_t *BT, int RowA, int ColA, int RowBT, \
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
+);
+
+extern void Nnfxp__MatMulABT_8x8q(\
+    int8_t *Out, const int8_t *A, const int8_t *BT, int RowA, int ColA, int RowBT, \
+    nnfxp_type QScalar, int Shift, int Stride, int StrideBT\
+);
+
+#else
+
 #define NNFXP__DEFINE(dp_name, matmul_name, dequantized_type, quantized_type) \
 static dequantized_type dp_name(\
     const quantized_type *A, const dequantized_type *B, int Length, nnfxp_type QScalar, int Shift\
@@ -267,6 +301,8 @@ NNFXP__DEFINE(Nnfxp__Dp_8x8q, Nnfxp__MatMulABT_8x8q, int8_t, int8_t);
 #define NNFXP__ONE(p_nn) NNFXP_ONE((p_nn)->FxpDecimal)
 #define NNFXP__ALIGN_UP(value) Nnfxp_AlignUp(value, NN->Alignment)
 #define NNFXP__ALIGN_PTR_UP(ptr) (typeof(ptr))Nnfxp_AlignUp((intptr_t)(ptr), NN->Alignment)
+
+#endif
 
 
 
